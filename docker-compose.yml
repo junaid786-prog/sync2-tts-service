@@ -1,0 +1,43 @@
+# Sync2 TTS Service - Docker Compose for Local Development
+# Use: docker-compose up --build
+
+version: '3.8'
+
+services:
+  tts-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sync2-tts-service
+    ports:
+      - "8765:8765"
+    environment:
+      - TTS_HOST=0.0.0.0
+      - TTS_PORT=8765
+      - TTS_MODEL=kokoro
+      - TTS_DEFAULT_VOICE=af_sarah
+      - TTS_USE_GPU=true
+      - TTS_LOG_LEVEL=INFO
+      - TTS_CACHE_ENABLED=true
+    volumes:
+      # Mount model cache to persist between restarts
+      - tts-models:/app/models
+      - tts-cache:/app/cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  tts-models:
+  tts-cache:
