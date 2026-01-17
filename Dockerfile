@@ -1,7 +1,7 @@
-# Sync2 TTS Service - GPU-enabled Docker Image
-# Base: NVIDIA CUDA runtime for GPU acceleration
+# Sync2 TTS Service - CPU Docker Image
+# Base: Python 3.11 slim
 
-FROM nvidia/cuda:12.1-runtime-ubuntu22.04
+FROM python:3.11-slim
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -12,15 +12,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
-    python3-pip \
     libsndfile1 \
     ffmpeg \
     curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python3
+    && rm -rf /var/lib/apt/lists/*
 
 # Create app user (non-root for security)
 RUN useradd -m -u 1000 appuser
@@ -31,8 +26,9 @@ WORKDIR /app
 # Copy requirements first (for layer caching)
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies (CPU version of PyTorch)
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY src/ ./src/
@@ -48,7 +44,7 @@ USER appuser
 EXPOSE 8765
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:8765/health || exit 1
 
 # Run the server
