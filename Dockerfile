@@ -28,7 +28,8 @@ COPY requirements.txt .
 
 # Install Python dependencies (CPU version of PyTorch)
 RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    python -m spacy download en_core_web_sm
 
 # Copy application code
 COPY src/ ./src/
