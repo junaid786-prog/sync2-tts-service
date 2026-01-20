@@ -1,0 +1,63 @@
+# Sync2 Piper TTS Service - CPU Docker Image
+# Fast, lightweight TTS using Piper
+
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Piper configuration
+ENV PIPER_BINARY=/app/piper/piper \
+    PIPER_MODEL_PATH=/app/models/en_US-amy-medium.onnx \
+    PIPER_CONFIG_PATH=/app/models/en_US-amy-medium.onnx.json
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsndfile1 \
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app user (non-root for security)
+RUN useradd -m -u 1000 appuser
+
+# Set working directory
+WORKDIR /app
+
+# Download and install Piper
+RUN mkdir -p /app/piper /app/models && \
+    wget -q https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz -O /tmp/piper.tar.gz && \
+    tar -xzf /tmp/piper.tar.gz -C /app/piper --strip-components=1 && \
+    rm /tmp/piper.tar.gz && \
+    chmod +x /app/piper/piper
+
+# Download voice models (Amy - high quality US English female)
+RUN wget -q https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/amy/medium/en_US-amy-medium.onnx -O /app/models/en_US-amy-medium.onnx && \
+    wget -q https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/amy/medium/en_US-amy-medium.onnx.json -O /app/models/en_US-amy-medium.onnx.json
+
+# Copy requirements and install Python dependencies
+COPY requirements.piper.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy Piper application code
+COPY piper/ ./piper/
+
+# Set ownership
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
+EXPOSE 8765
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8765/health || exit 1
+
+# Run the server
+CMD ["python", "-m", "piper.server"]
