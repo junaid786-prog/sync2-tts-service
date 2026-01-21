@@ -53,8 +53,8 @@ RUN pip install --no-cache-dir "huggingface_hub[cli]"
 RUN mkdir -p /app/voices /app/cache /app/models /app/checkpoints \
     && chown -R appuser:appuser /app
 
-# Copy Fish Speech application code
-COPY fish_speech/ ./fish_speech/
+# Copy our TTS server application code (renamed to avoid conflict with fish-speech-repo)
+COPY fish_tts_server/ ./fish_tts_server/
 
 # Set ownership
 RUN chown -R appuser:appuser /app
@@ -73,4 +73,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=300s --retries=3 \
     CMD curl -f http://localhost:8765/health || exit 1
 
 # Run the server
-CMD ["python", "-m", "fish_speech.server"]
+CMD ["python", "-m", "fish_tts_server.server"]
