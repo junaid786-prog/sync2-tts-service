@@ -68,21 +68,25 @@ class FishSpeechEngine:
         self.inference_engine = None
         self.model_loaded = False
 
-        # Add fish-speech repo to path
-        sys.path.insert(0, str(FISH_SPEECH_REPO))
-
-        # Set up pyrootutils before importing
-        os.chdir(str(FISH_SPEECH_REPO))
-
         self._load_models()
 
     def _load_models(self):
         """Load Fish Speech models"""
+        # Add fish-speech-repo paths to Python path
+        repo_path = str(FISH_SPEECH_REPO)
+        if repo_path not in sys.path:
+            sys.path.insert(0, repo_path)
+
+        # Also add the fish_speech subdirectory
+        fish_speech_path = str(FISH_SPEECH_REPO / "fish_speech")
+        if fish_speech_path not in sys.path:
+            sys.path.insert(0, fish_speech_path)
+
         try:
             import pyrootutils
-            pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
-        except:
-            pass
+            pyrootutils.setup_root(str(FISH_SPEECH_REPO), indicator=".project-root", pythonpath=True)
+        except Exception as e:
+            logger.warning(f"pyrootutils setup failed: {e}")
 
         try:
             from tools.llama.generate import launch_thread_safe_queue
