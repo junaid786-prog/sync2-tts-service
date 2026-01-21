@@ -1,5 +1,5 @@
 """
-FastAPI + WebSocket Server for Fish Speech / OpenAudio TTS Service
+FastAPI + WebSocket Server for Fish Speech TTS Service
 Most natural-sounding open-source TTS
 Drop-in replacement for Kokoro/Piper/XTTS with same interface
 """
@@ -10,7 +10,6 @@ import sys
 import os
 import io
 import wave
-import subprocess
 from typing import Optional
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global state
-fish_speech_pipeline = None
+tts_engine = None
 SAMPLE_RATE = 44100  # Fish Speech native sample rate
 OUTPUT_SAMPLE_RATE = 8000  # Telephony output
 
@@ -48,7 +47,7 @@ FISH_SPEECH_REPO = Path("/app/fish-speech-repo")
 # Available voices
 VOICES = {
     "default": {
-        "description": "OpenAudio Default Voice - Natural",
+        "description": "Fish Speech Default Voice - Natural",
         "language": "en"
     }
 }
@@ -57,118 +56,144 @@ DEFAULT_VOICE = "default"
 ALL_VOICES = list(VOICES.keys())
 
 
-class FishSpeechPipeline:
-    """Wrapper for Fish Speech / OpenAudio inference"""
+class FishSpeechEngine:
+    """Fish Speech TTS Engine using native API"""
 
     def __init__(self, checkpoint_path: Path, device: str = "cuda"):
         self.device = device
         self.checkpoint_path = checkpoint_path
+        self.precision = torch.half if device == "cuda" else torch.float32
+        self.llama_queue = None
+        self.decoder_model = None
+        self.inference_engine = None
         self.model_loaded = False
 
-        # Try to load using the fish-speech inference tools
+        # Add fish-speech repo to path
+        sys.path.insert(0, str(FISH_SPEECH_REPO))
+
+        # Set up pyrootutils before importing
+        os.chdir(str(FISH_SPEECH_REPO))
+
+        self._load_models()
+
+    def _load_models(self):
+        """Load Fish Speech models"""
         try:
-            # Add fish-speech repo to path
-            sys.path.insert(0, str(FISH_SPEECH_REPO))
+            import pyrootutils
+            pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+        except:
+            pass
 
-            # Try importing from fish_speech package
-            from fish_speech.models.text2semantic.llama import BaseModelArgs
-            from fish_speech.models.vqgan.modules.firefly import FireflyArchitecture
+        try:
+            from tools.llama.generate import launch_thread_safe_queue
+            from tools.vqgan.inference import load_model as load_decoder_model
 
-            logger.info("Fish Speech modules loaded successfully")
+            logger.info(f"Loading LLaMA model from {self.checkpoint_path}...")
+            self.llama_queue = launch_thread_safe_queue(
+                checkpoint_path=str(self.checkpoint_path),
+                device=self.device,
+                precision=self.precision,
+                compile=False,
+            )
+            logger.info("LLaMA model loaded")
+
+            # Load decoder
+            decoder_path = self.checkpoint_path / "firefly-gan-vq-fsq-8x1024-21hz-generator.pth"
+            logger.info(f"Loading decoder from {decoder_path}...")
+            self.decoder_model = load_decoder_model(
+                config_name="firefly_gan_vq",
+                checkpoint_path=str(decoder_path),
+                device=self.device,
+            )
+            logger.info("Decoder model loaded")
+
+            # Create inference engine
+            try:
+                from tools.inference_engine import TTSInferenceEngine
+                self.inference_engine = TTSInferenceEngine(
+                    llama_queue=self.llama_queue,
+                    decoder_model=self.decoder_model,
+                    precision=self.precision,
+                    compile=False,
+                )
+                logger.info("TTS Inference Engine created")
+            except ImportError:
+                logger.warning("TTSInferenceEngine not available, using direct inference")
+
             self.model_loaded = True
 
         except ImportError as e:
-            logger.warning(f"Could not import fish_speech modules: {e}")
-            # Fallback to CLI-based inference
-            self.model_loaded = False
+            logger.error(f"Failed to import Fish Speech modules: {e}")
+            logger.warning("Will use fallback mode")
+        except Exception as e:
+            logger.error(f"Failed to load models: {e}")
+            logger.warning("Will use fallback mode")
 
     def synthesize(self, text: str, speed: float = 1.0) -> np.ndarray:
-        """Synthesize text to audio using Fish Speech"""
+        """Synthesize text to audio"""
+        if self.inference_engine is not None:
+            return self._synthesize_engine(text, speed)
+        else:
+            return self._synthesize_fallback(text, speed)
 
-        if not self.model_loaded:
-            # Use CLI-based inference as fallback
-            return self._synthesize_cli(text, speed)
-
-        # Direct model inference would go here
-        # For now, use CLI approach which is more reliable
-        return self._synthesize_cli(text, speed)
-
-    def _synthesize_cli(self, text: str, speed: float = 1.0) -> np.ndarray:
-        """Synthesize using fish-speech CLI tools"""
-        import tempfile
-        import soundfile as sf
-
-        output_path = tempfile.mktemp(suffix=".wav")
-
+    def _synthesize_engine(self, text: str, speed: float = 1.0) -> np.ndarray:
+        """Synthesize using TTS inference engine"""
         try:
-            # Use the fish-speech inference CLI
-            cmd = [
-                "python", "-m", "tools.inference",
-                "--text", text,
-                "--checkpoint-path", str(self.checkpoint_path),
-                "--output", output_path
-            ]
+            from tools.schema import ServeTTSRequest
 
-            # Check if tools.inference exists, otherwise try alternative
-            result = subprocess.run(
-                cmd,
-                cwd=str(FISH_SPEECH_REPO),
-                capture_output=True,
-                text=True,
-                timeout=60
+            # Create TTS request
+            request = ServeTTSRequest(
+                text=text,
+                chunk_length=200,
+                format="wav",
+                streaming=False,
             )
 
-            if result.returncode != 0:
-                logger.warning(f"CLI inference failed: {result.stderr}")
-                # Generate silence as fallback
+            # Run inference
+            audio_chunks = []
+            for result in self.inference_engine.inference(request):
+                if result.code == "segment" or result.code == "final":
+                    if isinstance(result.audio, tuple):
+                        audio_chunks.append(result.audio[1])
+
+            if not audio_chunks:
+                logger.warning("No audio generated")
                 return np.zeros(int(SAMPLE_RATE * 2), dtype=np.float32)
 
-            # Read the generated audio
-            audio, sr = sf.read(output_path)
-
-            # Resample if needed
-            if sr != SAMPLE_RATE:
-                audio = self._resample(audio, sr, SAMPLE_RATE)
-
+            # Concatenate audio
+            audio = np.concatenate(audio_chunks)
             return audio.astype(np.float32)
 
         except Exception as e:
-            logger.error(f"CLI synthesis error: {e}")
-            # Return silence on error
-            return np.zeros(int(SAMPLE_RATE * 2), dtype=np.float32)
-        finally:
-            if os.path.exists(output_path):
-                os.remove(output_path)
+            logger.error(f"Engine synthesis error: {e}")
+            return self._synthesize_fallback(text, speed)
 
-    def _resample(self, audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-        """Simple resampling"""
-        if orig_sr == target_sr:
-            return audio
-        duration = len(audio) / orig_sr
-        target_length = int(duration * target_sr)
-        indices = np.linspace(0, len(audio) - 1, target_length)
-        return np.interp(indices, np.arange(len(audio)), audio)
+    def _synthesize_fallback(self, text: str, speed: float = 1.0) -> np.ndarray:
+        """Fallback synthesis - returns silence"""
+        logger.warning("Using fallback mode - returning silence")
+        # Return 2 seconds of silence
+        return np.zeros(int(SAMPLE_RATE * 2), dtype=np.float32)
 
 
 def load_fish_speech_model():
-    """Load Fish Speech / OpenAudio model"""
-    global fish_speech_pipeline
+    """Load Fish Speech model"""
+    global tts_engine
 
-    logger.info(f"Loading Fish Speech / OpenAudio model on {DEVICE}...")
+    logger.info(f"Loading Fish Speech model on {DEVICE}...")
     start = time.time()
 
     try:
-        fish_speech_pipeline = FishSpeechPipeline(
+        tts_engine = FishSpeechEngine(
             checkpoint_path=CHECKPOINT_DIR,
             device=DEVICE
         )
 
         load_time = time.time() - start
-        logger.info(f"Fish Speech pipeline initialized in {load_time:.1f}s on {DEVICE}")
+        logger.info(f"Fish Speech loaded in {load_time:.1f}s on {DEVICE}")
         return True
 
     except Exception as e:
-        logger.error(f"Failed to initialize Fish Speech: {e}")
+        logger.error(f"Failed to load Fish Speech: {e}")
         raise
 
 
@@ -189,7 +214,6 @@ async def lifespan(app: FastAPI):
         logger.info(f"Available voices: {len(ALL_VOICES)}")
     except Exception as e:
         logger.error(f"Failed to initialize Fish Speech: {e}")
-        # Don't raise - allow server to start for health checks
         logger.warning("Server starting in degraded mode")
 
     yield
@@ -200,7 +224,7 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="Sync2 Fish Speech TTS Service",
-    description="Natural human-like TTS service using Fish Speech / OpenAudio for Sync2.ai Voice AI Platform",
+    description="Natural human-like TTS service using Fish Speech for Sync2.ai Voice AI Platform",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -249,19 +273,18 @@ def audio_to_ulaw(audio: np.ndarray) -> bytes:
     return audioop.lin2ulaw(pcm, 2)
 
 
-def synthesize_with_fish_speech(text: str, voice: str = "default", language: str = "en", speed: float = 1.0) -> np.ndarray:
+def synthesize_speech(text: str, voice: str = "default", language: str = "en", speed: float = 1.0) -> np.ndarray:
     """
-    Synthesize speech using Fish Speech / OpenAudio
+    Synthesize speech using Fish Speech
     Returns numpy array of audio samples
     """
-    global fish_speech_pipeline
+    global tts_engine
 
-    if fish_speech_pipeline is None:
-        raise RuntimeError("Fish Speech pipeline not loaded")
+    if tts_engine is None:
+        raise RuntimeError("Fish Speech engine not loaded")
 
     try:
-        # Generate audio using Fish Speech
-        audio = fish_speech_pipeline.synthesize(text=text, speed=speed)
+        audio = tts_engine.synthesize(text=text, speed=speed)
 
         # Ensure audio is 1D
         if len(audio.shape) > 1:
@@ -285,14 +308,16 @@ async def health_check():
     gpu_available = torch.cuda.is_available()
     gpu_name = torch.cuda.get_device_name(0) if gpu_available else None
 
+    model_ready = tts_engine is not None and tts_engine.model_loaded
+
     return {
-        "status": "ok" if fish_speech_pipeline is not None else "degraded",
+        "status": "ok" if model_ready else "degraded",
         "model": "Fish-Speech-1.5",
-        "model_loaded": fish_speech_pipeline is not None,
+        "model_loaded": model_ready,
         "device": DEVICE,
         "gpu_available": gpu_available,
         "gpu_name": gpu_name,
-        "ready": fish_speech_pipeline is not None,
+        "ready": model_ready,
         "sample_rate": SAMPLE_RATE,
         "output_sample_rate": OUTPUT_SAMPLE_RATE,
         "total_voices": len(ALL_VOICES)
@@ -331,8 +356,8 @@ async def synthesize(request: TTSRequest):
     start = time.time()
 
     try:
-        # Generate audio with Fish Speech
-        full_audio = synthesize_with_fish_speech(
+        # Generate audio
+        full_audio = synthesize_speech(
             request.text,
             request.voice,
             request.language,
@@ -432,8 +457,8 @@ async def websocket_stream(websocket: WebSocket):
             total_bytes = 0
 
             try:
-                # Generate audio with Fish Speech
-                audio = synthesize_with_fish_speech(text, voice, language, speed)
+                # Generate audio
+                audio = synthesize_speech(text, voice, language, speed)
 
                 # Resample to 8kHz for telephony
                 resampled = resample_audio(audio, SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
