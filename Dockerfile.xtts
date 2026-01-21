@@ -1,7 +1,7 @@
 # Sync2 XTTS v2 TTS Service - GPU Docker Image
 # Human-like voice synthesis with CUDA acceleration
 
-FROM nvidia/cuda:11.8-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -33,7 +33,7 @@ WORKDIR /app
 COPY requirements.xtts.txt ./requirements.txt
 
 # Install PyTorch with CUDA support and TTS library
-RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu118 && \
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121 && \
     pip install --no-cache-dir -r requirements.txt
 
 # Pre-download XTTS v2 model (speeds up first startup)
