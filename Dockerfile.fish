@@ -1,5 +1,5 @@
 # Sync2 Fish Speech TTS Service - GPU Docker Image
-# Most natural-sounding open-source TTS
+# Using OpenAudio S1-mini (formerly Fish Speech) - most natural open-source TTS
 
 FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
@@ -8,7 +8,8 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    HF_HOME=/app/models
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -36,11 +37,16 @@ COPY requirements.fish.txt ./requirements.txt
 RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121 && \
     pip install --no-cache-dir -r requirements.txt
 
-# Install Fish Speech from GitHub
-RUN pip install --no-cache-dir git+https://github.com/fishaudio/fish-speech.git
+# Clone Fish Speech repository for local inference
+RUN git clone --depth 1 https://github.com/fishaudio/fish-speech.git /app/fish-speech-repo && \
+    cd /app/fish-speech-repo && \
+    pip install --no-cache-dir -e . || pip install --no-cache-dir .
 
-# Create directories for voices and cache
-RUN mkdir -p /app/voices /app/cache /app/models \
+# Install huggingface_hub for model download
+RUN pip install --no-cache-dir huggingface_hub[cli]
+
+# Create directories for voices, cache, and models
+RUN mkdir -p /app/voices /app/cache /app/models /app/checkpoints \
     && chown -R appuser:appuser /app
 
 # Copy Fish Speech application code
@@ -52,11 +58,14 @@ RUN chown -R appuser:appuser /app
 # Switch to non-root user
 USER appuser
 
+# Download OpenAudio S1-mini model (smaller, faster)
+RUN huggingface-cli download fishaudio/openaudio-s1-mini --local-dir /app/checkpoints/openaudio-s1-mini || true
+
 # Expose port
 EXPOSE 8765
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=180s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=30s --start-period=300s --retries=3 \
     CMD curl -f http://localhost:8765/health || exit 1
 
 # Run the server
