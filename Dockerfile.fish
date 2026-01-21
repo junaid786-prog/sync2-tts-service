@@ -42,9 +42,11 @@ RUN git clone --depth 1 --branch v1.5.0 https://github.com/fishaudio/fish-speech
     git clone --depth 1 https://github.com/fishaudio/fish-speech.git /app/fish-speech-repo
 
 # Install Fish Speech dependencies from pyproject.toml
-RUN cd /app/fish-speech-repo && \
-    pip install --no-cache-dir kui uvicorn loguru pyrootutils vector_quantize_pytorch resampy tiktoken funasr lightning && \
-    pip install --no-cache-dir .
+RUN pip install --no-cache-dir \
+    kui uvicorn loguru pyrootutils vector_quantize_pytorch==1.14.24 resampy tiktoken lightning \
+    rich gradio grpcio loralib einx zstandard pydub ormsgpack cachetools pydantic==2.9.2 \
+    datasets==2.18.0 natsort silero-vad funasr==1.1.5 opencc-python-reimplemented==0.1.7 \
+    && cd /app/fish-speech-repo && pip install --no-cache-dir .
 
 # Install huggingface_hub for model download
 RUN pip install --no-cache-dir "huggingface_hub[cli]"
