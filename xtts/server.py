@@ -192,9 +192,11 @@ def synthesize_with_xtts(text: str, voice: str = "default", language: str = "en"
                 speed=speed
             )
         else:
-            # Use default XTTS voice
+            # Use built-in XTTS speaker
+            # XTTS v2 has built-in speakers, we use "Claribel Dervla" as default female voice
             audio = tts_model.tts(
                 text=text,
+                speaker="Claribel Dervla",
                 language=language,
                 speed=speed
             )
