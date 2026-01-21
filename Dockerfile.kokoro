@@ -1,0 +1,57 @@
+# Sync2 Kokoro TTS Service - GPU Docker Image
+# Human-like voice synthesis with CUDA acceleration
+
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    libsndfile1 \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3
+
+# Create app user (non-root for security)
+RUN useradd -m -u 1000 appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements first (for layer caching)
+COPY requirements.txt .
+
+# Install PyTorch with CUDA support and other dependencies
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir -r requirements.txt && \
+    python -m spacy download en_core_web_sm
+
+# Copy application code
+COPY src/ ./src/
+
+# Create directories for model cache
+RUN mkdir -p /app/models /app/cache \
+    && chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
+EXPOSE 8765
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8765/health || exit 1
+
+# Run the server
+CMD ["python", "-m", "src.server"]

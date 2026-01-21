@@ -1,13 +1,12 @@
 """
-FastAPI + WebSocket Server for XTTS v2 TTS Service
-Human-like voice synthesis with GPU acceleration
-Drop-in replacement for Kokoro/Piper TTS with same interface
+FastAPI + WebSocket Server for Chatterbox-Turbo TTS Service
+Sub-200ms latency voice synthesis with GPU acceleration
+Drop-in replacement for Kokoro/XTTS with same interface
 """
 import asyncio
 import logging
 import time
 import sys
-import os
 import io
 import wave
 import torch
@@ -34,14 +33,18 @@ logger = logging.getLogger(__name__)
 
 # Global state
 tts_model = None
-SAMPLE_RATE = 24000  # XTTS native sample rate
+SAMPLE_RATE = 24000  # Chatterbox native sample rate
 OUTPUT_SAMPLE_RATE = 8000  # Telephony output
 
 # Device configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Available voices (speaker reference files)
+# Available voices (reference audio files for voice cloning)
 VOICES = {
+    "default": {
+        "description": "Chatterbox Default Voice",
+        "language": "en"
+    },
     "sarah": {
         "description": "US English Female - Warm and friendly",
         "language": "en"
@@ -53,10 +56,6 @@ VOICES = {
     "james": {
         "description": "US English Male - Deep and calm",
         "language": "en"
-    },
-    "default": {
-        "description": "XTTS Default Voice",
-        "language": "en"
     }
 }
 
@@ -64,25 +63,25 @@ DEFAULT_VOICE = "default"
 ALL_VOICES = list(VOICES.keys())
 
 
-def load_xtts_model():
-    """Load XTTS v2 model"""
+def load_chatterbox_model():
+    """Load Chatterbox-Turbo model"""
     global tts_model
 
-    logger.info(f"Loading XTTS v2 model on {DEVICE}...")
+    logger.info(f"Loading Chatterbox-Turbo model on {DEVICE}...")
     start = time.time()
 
     try:
-        from TTS.api import TTS
+        from chatterbox.tts_turbo import ChatterboxTurboTTS
 
-        # Load XTTS v2 model
-        tts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(DEVICE)
+        # Load Chatterbox-Turbo model
+        tts_model = ChatterboxTurboTTS.from_pretrained(device=DEVICE)
 
         load_time = time.time() - start
-        logger.info(f"XTTS v2 model loaded in {load_time:.1f}s on {DEVICE}")
+        logger.info(f"Chatterbox-Turbo model loaded in {load_time:.1f}s on {DEVICE}")
 
         return True
     except Exception as e:
-        logger.error(f"Failed to load XTTS model: {e}")
+        logger.error(f"Failed to load Chatterbox-Turbo model: {e}")
         raise
 
 
@@ -90,7 +89,7 @@ def load_xtts_model():
 async def lifespan(app: FastAPI):
     """Application lifespan handler - load model on startup"""
     logger.info("=" * 50)
-    logger.info("  Sync2 XTTS v2 TTS Service - Starting")
+    logger.info("  Sync2 Chatterbox-Turbo TTS Service - Starting")
     logger.info(f"  Device: {DEVICE}")
     logger.info(f"  GPU Available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
@@ -98,22 +97,22 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 50)
 
     try:
-        load_xtts_model()
-        logger.info("XTTS v2 TTS ready")
+        load_chatterbox_model()
+        logger.info("Chatterbox-Turbo TTS ready")
         logger.info(f"Available voices: {len(ALL_VOICES)}")
     except Exception as e:
-        logger.error(f"Failed to initialize XTTS: {e}")
+        logger.error(f"Failed to initialize Chatterbox-Turbo: {e}")
         raise
 
     yield
 
-    logger.info("Shutting down XTTS v2 TTS Service...")
+    logger.info("Shutting down Chatterbox-Turbo TTS Service...")
 
 
 # Create FastAPI app
 app = FastAPI(
-    title="Sync2 XTTS v2 TTS Service",
-    description="Human-like TTS service using XTTS v2 for Sync2.ai Voice AI Platform",
+    title="Sync2 Chatterbox-Turbo TTS Service",
+    description="Sub-200ms latency TTS service using Chatterbox-Turbo for Sync2.ai Voice AI Platform",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -162,56 +161,55 @@ def audio_to_ulaw(audio: np.ndarray) -> bytes:
     return audioop.lin2ulaw(pcm, 2)
 
 
-def synthesize_with_xtts(text: str, voice: str = "default", language: str = "en", speed: float = 1.0) -> np.ndarray:
+def synthesize_with_chatterbox(text: str, voice: str = "default", speed: float = 1.0) -> np.ndarray:
     """
-    Synthesize speech using XTTS v2
+    Synthesize speech using Chatterbox-Turbo
     Returns numpy array of audio samples
     """
     global tts_model
 
     if tts_model is None:
-        raise RuntimeError("XTTS model not loaded")
+        raise RuntimeError("Chatterbox-Turbo model not loaded")
 
     try:
-        # Get speaker wav path if custom voice
-        speaker_wav = None
+        # Get speaker reference wav path if custom voice
+        audio_prompt_path = None
         voice_dir = Path("/app/voices")
 
         if voice != "default" and voice_dir.exists():
             voice_file = voice_dir / f"{voice}.wav"
             if voice_file.exists():
-                speaker_wav = str(voice_file)
+                audio_prompt_path = str(voice_file)
 
-        # Generate audio
-        if speaker_wav:
+        # Generate audio with Chatterbox-Turbo
+        if audio_prompt_path:
             # Use voice cloning with reference audio
-            audio = tts_model.tts(
+            wav = tts_model.generate(
                 text=text,
-                speaker_wav=speaker_wav,
-                language=language,
-                speed=speed
+                audio_prompt_path=audio_prompt_path
             )
         else:
-            # Use built-in XTTS speaker
-            # XTTS v2 has built-in speakers, we use "Claribel Dervla" as default female voice
-            audio = tts_model.tts(
-                text=text,
-                speaker="Claribel Dervla",
-                language=language,
-                speed=speed
-            )
+            # Use default voice (no reference audio)
+            wav = tts_model.generate(text=text)
 
         # Convert to numpy array
-        audio = np.array(audio, dtype=np.float32)
+        if torch.is_tensor(wav):
+            audio = wav.cpu().numpy()
+        else:
+            audio = np.array(wav, dtype=np.float32)
+
+        # Ensure 1D array
+        if audio.ndim > 1:
+            audio = audio.squeeze()
 
         # Normalize
         if np.max(np.abs(audio)) > 0:
             audio = audio / np.max(np.abs(audio)) * 0.95
 
-        return audio
+        return audio.astype(np.float32)
 
     except Exception as e:
-        logger.error(f"XTTS synthesis error: {e}")
+        logger.error(f"Chatterbox-Turbo synthesis error: {e}")
         raise
 
 
@@ -224,7 +222,7 @@ async def health_check():
 
     return {
         "status": "ok" if tts_model is not None else "error",
-        "model": "XTTS-v2",
+        "model": "Chatterbox-Turbo",
         "model_loaded": tts_model is not None,
         "device": DEVICE,
         "gpu_available": gpu_available,
@@ -268,11 +266,10 @@ async def synthesize(request: TTSRequest):
     start = time.time()
 
     try:
-        # Generate audio with XTTS
-        full_audio = synthesize_with_xtts(
+        # Generate audio with Chatterbox-Turbo
+        full_audio = synthesize_with_chatterbox(
             request.text,
             request.voice,
-            request.language,
             request.speed
         )
         gen_time = time.time() - start
@@ -358,7 +355,6 @@ async def websocket_stream(websocket: WebSocket):
             voice = data.get("voice", DEFAULT_VOICE)
             output_format = data.get("format", "ulaw")
             speed = data.get("speed", 1.0)
-            language = data.get("language", "en")
 
             if not text:
                 await websocket.send_json({"error": "Text is required"})
@@ -370,8 +366,8 @@ async def websocket_stream(websocket: WebSocket):
             total_bytes = 0
 
             try:
-                # Generate audio with XTTS
-                audio = synthesize_with_xtts(text, voice, language, speed)
+                # Generate audio with Chatterbox-Turbo
+                audio = synthesize_with_chatterbox(text, voice, speed)
 
                 # Resample to 8kHz for telephony
                 resampled = resample_audio(audio, SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
@@ -415,7 +411,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("=" * 50)
-    print("  Sync2 XTTS v2 TTS Service")
+    print("  Sync2 Chatterbox-Turbo TTS Service")
     print(f"  Device: {DEVICE}")
     print(f"  GPU: {torch.cuda.is_available()}")
     print("=" * 50)
