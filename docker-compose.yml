@@ -1,16 +1,18 @@
 # Sync2 TTS Service - Docker Compose
-# Supports both Kokoro and Piper TTS engines
+# Supports Kokoro, Piper, and XTTS v2 TTS engines
 #
 # Usage:
 #   Kokoro: docker-compose up kokoro-tts -d --build
 #   Piper:  docker-compose up piper-tts -d --build
+#   XTTS:   docker-compose up xtts-tts -d --build (requires GPU)
 #
-# Switch between them:
+# Switch between them (all use port 8765):
 #   docker stop sync2-tts-service && docker start sync2-piper-service
-#   docker stop sync2-piper-service && docker start sync2-tts-service
+#   docker stop sync2-piper-service && docker start sync2-xtts-service
+#   docker stop sync2-xtts-service && docker start sync2-tts-service
 
 services:
-  # Kokoro TTS (existing - slower but more expressive)
+  # Kokoro TTS (CPU - slower but expressive)
   kokoro-tts:
     build:
       context: .
@@ -37,7 +39,7 @@ services:
       retries: 3
       start_period: 120s
 
-  # Piper TTS (new - faster, lighter)
+  # Piper TTS (CPU - fast, lightweight)
   piper-tts:
     build:
       context: .
@@ -61,7 +63,40 @@ services:
       retries: 3
       start_period: 30s
 
+  # XTTS v2 TTS (GPU - human-like voice quality)
+  xtts-tts:
+    build:
+      context: .
+      dockerfile: Dockerfile.xtts
+    container_name: sync2-xtts-service
+    ports:
+      - "8765:8765"
+    environment:
+      - TTS_HOST=0.0.0.0
+      - TTS_PORT=8765
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - xtts-models:/app/models
+      - xtts-cache:/root/.local/share/tts
+      - ./voices:/app/voices  # Mount custom voice samples
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 180s
+
 volumes:
   tts-models:
   tts-cache:
   piper-models:
+  xtts-models:
+  xtts-cache:
