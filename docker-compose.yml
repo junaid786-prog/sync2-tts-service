@@ -1,15 +1,17 @@
 # Sync2 TTS Service - Docker Compose
-# Supports Kokoro, Piper, and XTTS v2 TTS engines
+# Supports Kokoro, Piper, XTTS v2, and Fish Speech TTS engines
 #
 # Usage:
-#   Kokoro: docker-compose up kokoro-tts -d --build
-#   Piper:  docker-compose up piper-tts -d --build
-#   XTTS:   docker-compose up xtts-tts -d --build (requires GPU)
+#   Kokoro:      docker-compose up kokoro-tts -d --build
+#   Piper:       docker-compose up piper-tts -d --build
+#   XTTS:        docker-compose up xtts-tts -d --build (requires GPU)
+#   Fish Speech: docker-compose up fish-tts -d --build (requires GPU, most natural)
 #
 # Switch between them (all use port 8765):
 #   docker stop sync2-tts-service && docker start sync2-piper-service
 #   docker stop sync2-piper-service && docker start sync2-xtts-service
-#   docker stop sync2-xtts-service && docker start sync2-tts-service
+#   docker stop sync2-xtts-service && docker start sync2-fish-service
+#   docker stop sync2-fish-service && docker start sync2-tts-service
 
 services:
   # Kokoro TTS (CPU - slower but expressive)
@@ -78,7 +80,38 @@ services:
     volumes:
       - xtts-models:/app/models
       - xtts-cache:/root/.local/share/tts
-      - ./voices:/app/voices  # Mount custom voice samples
+      - ./voices:/app/voices
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 180s
+
+  # Fish Speech TTS (GPU - most natural, human-like)
+  fish-tts:
+    build:
+      context: .
+      dockerfile: Dockerfile.fish
+    container_name: sync2-fish-service
+    ports:
+      - "8765:8765"
+    environment:
+      - TTS_HOST=0.0.0.0
+      - TTS_PORT=8765
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - fish-models:/app/models
+      - fish-cache:/app/cache
+      - ./voices:/app/voices
     deploy:
       resources:
         reservations:
@@ -100,3 +133,5 @@ volumes:
   piper-models:
   xtts-models:
   xtts-cache:
+  fish-models:
+  fish-cache:
