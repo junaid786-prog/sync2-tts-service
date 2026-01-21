@@ -42,7 +42,7 @@ OUTPUT_SAMPLE_RATE = 8000  # Telephony output
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Checkpoint paths
-CHECKPOINT_DIR = Path("/app/checkpoints/openaudio-s1-mini")
+CHECKPOINT_DIR = Path("/app/checkpoints/fish-speech-1.5")
 FISH_SPEECH_REPO = Path("/app/fish-speech-repo")
 
 # Available voices
@@ -287,7 +287,7 @@ async def health_check():
 
     return {
         "status": "ok" if fish_speech_pipeline is not None else "degraded",
-        "model": "OpenAudio-S1-mini",
+        "model": "Fish-Speech-1.5",
         "model_loaded": fish_speech_pipeline is not None,
         "device": DEVICE,
         "gpu_available": gpu_available,
