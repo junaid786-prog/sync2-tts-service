@@ -192,15 +192,16 @@ class FishSpeechEngine:
             from fish_speech.utils.schema import ServeTTSRequest
 
             # Create TTS request with streaming enabled
+            # Calmer voice settings: lower temperature & top_p for smoother, less aggressive output
             request = ServeTTSRequest(
                 text=text,
                 references=[],
                 reference_id=None,
                 max_new_tokens=1024,
                 chunk_length=100,  # Smaller chunks for faster streaming
-                top_p=0.7,
-                repetition_penalty=1.2,
-                temperature=0.7,
+                top_p=0.6,
+                repetition_penalty=1.1,
+                temperature=0.5,
                 format="wav",
                 streaming=True  # Enable streaming!
             )
@@ -268,15 +269,16 @@ class FishSpeechEngine:
             from tools.server.inference import inference_wrapper as inference
 
             # Create TTS request
+            # Calmer voice settings: lower temperature & top_p for smoother, less aggressive output
             request = ServeTTSRequest(
                 text=text,
                 references=[],
                 reference_id=None,
                 max_new_tokens=1024,
                 chunk_length=200,
-                top_p=0.7,
-                repetition_penalty=1.2,
-                temperature=0.7,
+                top_p=0.6,
+                repetition_penalty=1.1,
+                temperature=0.5,
                 format="wav",
                 streaming=False
             )
