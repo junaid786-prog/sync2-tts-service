@@ -12,11 +12,11 @@ ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/app/models \
     TRANSFORMERS_CACHE=/app/models
 
-# Install system dependencies
+# Install system dependencies (use Python 3.11 available in Ubuntu 22.04)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    python3.12-dev \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
     python3-pip \
     libsndfile1 \
     ffmpeg \
@@ -26,8 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/python3.12 /usr/bin/python \
-    && ln -sf /usr/bin/python3.12 /usr/bin/python3
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3
 
 # Upgrade pip
 RUN pip install --upgrade pip setuptools wheel
