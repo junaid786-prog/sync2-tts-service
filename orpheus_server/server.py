@@ -1,7 +1,7 @@
 """
-FastAPI + WebSocket Server for Chatterbox-Turbo TTS Service
-Sub-200ms latency voice synthesis with GPU acceleration
-Drop-in replacement for Kokoro/XTTS with same interface
+FastAPI + WebSocket Server for Orpheus TTS Service
+Human-like voice synthesis with emotional control
+Drop-in replacement for Kokoro/XTTS/Chatterbox with same interface
 """
 import asyncio
 import logging
@@ -16,20 +16,21 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import Response, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 # Setup HuggingFace token from environment
 HF_TOKEN = os.environ.get("HF_TOKEN")
 if HF_TOKEN:
     os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
+    os.environ["HF_TOKEN"] = HF_TOKEN
     try:
         from huggingface_hub import login
         login(token=HF_TOKEN, add_to_git_credential=False)
-    except Exception as e:
-        pass  # Will handle in model loading
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import Response, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+    except Exception:
+        pass
 
 # Fix encoding for Windows
 if sys.platform == 'win32':
@@ -44,55 +45,74 @@ logger = logging.getLogger(__name__)
 
 # Global state
 tts_model = None
-SAMPLE_RATE = 24000  # Chatterbox native sample rate
+SAMPLE_RATE = 24000  # Orpheus native sample rate
 OUTPUT_SAMPLE_RATE = 8000  # Telephony output
 
 # Device configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Available voices (reference audio files for voice cloning)
+# Available voices in Orpheus
 VOICES = {
-    "default": {
-        "description": "Chatterbox Default Voice",
+    "tara": {
+        "description": "US English Female - Natural and warm",
         "language": "en"
     },
-    "sarah": {
-        "description": "US English Female - Warm and friendly",
+    "leah": {
+        "description": "US English Female - Clear and professional",
         "language": "en"
     },
-    "emma": {
-        "description": "US English Female - Professional",
+    "jess": {
+        "description": "US English Female - Friendly",
         "language": "en"
     },
-    "james": {
+    "mia": {
+        "description": "US English Female - Soft and gentle",
+        "language": "en"
+    },
+    "zoe": {
+        "description": "US English Female - Energetic",
+        "language": "en"
+    },
+    "leo": {
         "description": "US English Male - Deep and calm",
+        "language": "en"
+    },
+    "dan": {
+        "description": "US English Male - Professional",
+        "language": "en"
+    },
+    "zac": {
+        "description": "US English Male - Friendly",
         "language": "en"
     }
 }
 
-DEFAULT_VOICE = "default"
+DEFAULT_VOICE = "tara"
 ALL_VOICES = list(VOICES.keys())
 
 
-def load_chatterbox_model():
-    """Load Chatterbox-Turbo model"""
+def load_orpheus_model():
+    """Load Orpheus TTS model"""
     global tts_model
 
-    logger.info(f"Loading Chatterbox-Turbo model on {DEVICE}...")
+    logger.info(f"Loading Orpheus TTS model on {DEVICE}...")
     start = time.time()
 
     try:
-        from chatterbox.tts_turbo import ChatterboxTurboTTS
+        from orpheus_tts import OrpheusModel
 
-        # Load Chatterbox-Turbo model
-        tts_model = ChatterboxTurboTTS.from_pretrained(device=DEVICE)
+        # Load Orpheus model
+        tts_model = OrpheusModel(
+            model_name="canopylabs/orpheus-tts-0.1-finetune-prod",
+            max_model_len=2048
+        )
 
         load_time = time.time() - start
-        logger.info(f"Chatterbox-Turbo model loaded in {load_time:.1f}s on {DEVICE}")
+        logger.info(f"Orpheus TTS model loaded in {load_time:.1f}s on {DEVICE}")
 
         return True
     except Exception as e:
-        logger.error(f"Failed to load Chatterbox-Turbo model: {e}")
+        logger.error(f"Failed to load Orpheus TTS model: {e}")
         raise
 
 
@@ -100,7 +120,7 @@ def load_chatterbox_model():
 async def lifespan(app: FastAPI):
     """Application lifespan handler - load model on startup"""
     logger.info("=" * 50)
-    logger.info("  Sync2 Chatterbox-Turbo TTS Service - Starting")
+    logger.info("  Sync2 Orpheus TTS Service - Starting")
     logger.info(f"  Device: {DEVICE}")
     logger.info(f"  GPU Available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
@@ -108,22 +128,22 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 50)
 
     try:
-        load_chatterbox_model()
-        logger.info("Chatterbox-Turbo TTS ready")
+        load_orpheus_model()
+        logger.info("Orpheus TTS ready")
         logger.info(f"Available voices: {len(ALL_VOICES)}")
     except Exception as e:
-        logger.error(f"Failed to initialize Chatterbox-Turbo: {e}")
+        logger.error(f"Failed to initialize Orpheus TTS: {e}")
         raise
 
     yield
 
-    logger.info("Shutting down Chatterbox-Turbo TTS Service...")
+    logger.info("Shutting down Orpheus TTS Service...")
 
 
 # Create FastAPI app
 app = FastAPI(
-    title="Sync2 Chatterbox-Turbo TTS Service",
-    description="Sub-200ms latency TTS service using Chatterbox-Turbo for Sync2.ai Voice AI Platform",
+    title="Sync2 Orpheus TTS Service",
+    description="Human-like TTS service using Orpheus for Sync2.ai Voice AI Platform",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -141,7 +161,7 @@ app.add_middleware(
 # Request models
 class TTSRequest(BaseModel):
     text: str
-    voice: str = "default"
+    voice: str = "tara"
     speed: float = 1.0
     output_format: str = "wav"  # "wav", "pcm16", "ulaw"
     language: str = "en"
@@ -172,55 +192,48 @@ def audio_to_ulaw(audio: np.ndarray) -> bytes:
     return audioop.lin2ulaw(pcm, 2)
 
 
-def synthesize_with_chatterbox(text: str, voice: str = "default", speed: float = 1.0) -> np.ndarray:
+def synthesize_with_orpheus(text: str, voice: str = "tara", speed: float = 1.0) -> np.ndarray:
     """
-    Synthesize speech using Chatterbox-Turbo
+    Synthesize speech using Orpheus TTS
     Returns numpy array of audio samples
     """
     global tts_model
 
     if tts_model is None:
-        raise RuntimeError("Chatterbox-Turbo model not loaded")
+        raise RuntimeError("Orpheus TTS model not loaded")
 
     try:
-        # Get speaker reference wav path if custom voice
-        audio_prompt_path = None
-        voice_dir = Path("/app/voices")
+        # Validate voice
+        if voice not in ALL_VOICES:
+            voice = DEFAULT_VOICE
 
-        if voice != "default" and voice_dir.exists():
-            voice_file = voice_dir / f"{voice}.wav"
-            if voice_file.exists():
-                audio_prompt_path = str(voice_file)
+        # Generate audio with Orpheus (streaming output)
+        syn_tokens = tts_model.generate_speech(
+            prompt=text,
+            voice=voice
+        )
 
-        # Generate audio with Chatterbox-Turbo
-        if audio_prompt_path:
-            # Use voice cloning with reference audio
-            wav = tts_model.generate(
-                text=text,
-                audio_prompt_path=audio_prompt_path
-            )
+        # Collect all audio chunks
+        audio_chunks = []
+        for audio_chunk in syn_tokens:
+            audio_chunks.append(audio_chunk)
+
+        # Combine chunks into single audio array
+        if audio_chunks:
+            audio_bytes = b''.join(audio_chunks)
+            # Convert bytes to numpy array (16-bit PCM)
+            audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
         else:
-            # Use default voice (no reference audio)
-            wav = tts_model.generate(text=text)
-
-        # Convert to numpy array
-        if torch.is_tensor(wav):
-            audio = wav.cpu().numpy()
-        else:
-            audio = np.array(wav, dtype=np.float32)
-
-        # Ensure 1D array
-        if audio.ndim > 1:
-            audio = audio.squeeze()
+            audio = np.array([], dtype=np.float32)
 
         # Normalize
-        if np.max(np.abs(audio)) > 0:
+        if len(audio) > 0 and np.max(np.abs(audio)) > 0:
             audio = audio / np.max(np.abs(audio)) * 0.95
 
         return audio.astype(np.float32)
 
     except Exception as e:
-        logger.error(f"Chatterbox-Turbo synthesis error: {e}")
+        logger.error(f"Orpheus TTS synthesis error: {e}")
         raise
 
 
@@ -233,7 +246,7 @@ async def health_check():
 
     return {
         "status": "ok" if tts_model is not None else "error",
-        "model": "Chatterbox-Turbo",
+        "model": "Orpheus-TTS",
         "model_loaded": tts_model is not None,
         "device": DEVICE,
         "gpu_available": gpu_available,
@@ -277,8 +290,8 @@ async def synthesize(request: TTSRequest):
     start = time.time()
 
     try:
-        # Generate audio with Chatterbox-Turbo
-        full_audio = synthesize_with_chatterbox(
+        # Generate audio with Orpheus TTS
+        full_audio = synthesize_with_orpheus(
             request.text,
             request.voice,
             request.speed
@@ -350,7 +363,7 @@ async def websocket_stream(websocket: WebSocket):
 
     Protocol:
     1. Client connects
-    2. Client sends JSON: {"text": "Hello", "voice": "default", "format": "ulaw"}
+    2. Client sends JSON: {"text": "Hello", "voice": "tara", "format": "ulaw"}
     3. Server streams binary audio chunks
     4. Server sends JSON: {"done": true, "duration_ms": 123}
     """
@@ -377,8 +390,8 @@ async def websocket_stream(websocket: WebSocket):
             total_bytes = 0
 
             try:
-                # Generate audio with Chatterbox-Turbo
-                audio = synthesize_with_chatterbox(text, voice, speed)
+                # Generate audio with Orpheus TTS
+                audio = synthesize_with_orpheus(text, voice, speed)
 
                 # Resample to 8kHz for telephony
                 resampled = resample_audio(audio, SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
@@ -422,7 +435,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("=" * 50)
-    print("  Sync2 Chatterbox-Turbo TTS Service")
+    print("  Sync2 Orpheus TTS Service")
     print(f"  Device: {DEVICE}")
     print(f"  GPU: {torch.cuda.is_available()}")
     print("=" * 50)
@@ -431,6 +444,8 @@ if __name__ == "__main__":
     print("    GET  http://localhost:8765/voices")
     print("    POST http://localhost:8765/tts/synthesize")
     print("    WS   ws://localhost:8765/tts/stream")
+    print("=" * 50)
+    print("  Voices: tara, leah, jess, mia, zoe, leo, dan, zac")
     print("=" * 50)
 
     uvicorn.run(app, host="0.0.0.0", port=8765)
