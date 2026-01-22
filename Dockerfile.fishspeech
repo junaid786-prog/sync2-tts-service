@@ -1,0 +1,81 @@
+# Sync2 Fish Speech TTS Service - GPU Docker Image
+# #1 Ranked on TTS-Arena2 - Most human-like voice synthesis
+
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    HF_HOME=/app/models \
+    TRANSFORMERS_CACHE=/app/models
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
+    python3-pip \
+    libsndfile1 \
+    ffmpeg \
+    portaudio19-dev \
+    libsox-dev \
+    curl \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3
+
+# Upgrade pip
+RUN pip install --upgrade pip setuptools wheel
+
+# Create app user
+RUN useradd -m -u 1000 appuser
+
+# Set working directory
+WORKDIR /app
+
+# Clone Fish Speech repository
+RUN git clone https://github.com/fishaudio/fish-speech.git /app/fish-speech
+
+# Install PyTorch with CUDA support
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# Install Fish Speech
+WORKDIR /app/fish-speech
+RUN pip install --no-cache-dir -e ".[cu121]" || pip install --no-cache-dir -e .
+
+# Copy our server wrapper
+WORKDIR /app
+COPY requirements.fishspeech.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create directories
+RUN mkdir -p /app/voices /app/cache /app/models /app/models/hub /app/checkpoints \
+    && chmod -R 777 /app/models /app/checkpoints \
+    && chown -R appuser:appuser /app
+
+# Copy Fish Speech server
+COPY fishspeech_server/ ./fishspeech_server/
+
+# Set ownership
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Download model checkpoints (openaudio-s1-mini)
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('fishaudio/openaudio-s1-mini', local_dir='/app/checkpoints/openaudio-s1-mini')" || true
+
+# Expose port
+EXPOSE 8765
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=300s --retries=3 \
+    CMD curl -f http://localhost:8765/health || exit 1
+
+# Run the server
+CMD ["python", "-m", "fishspeech_server.server"]
