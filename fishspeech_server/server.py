@@ -221,6 +221,9 @@ class FishSpeechEngine:
         logger.info("Trying webui inference method...")
 
         try:
+            # Escape text for use in the script
+            escaped_text = text.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
+
             # Create a simple inference script
             script = f'''
 import sys
@@ -237,7 +240,7 @@ try:
         device="{DEVICE}"
     )
 
-    result = engine.inference(text="{text.replace('"', '\\"')}")
+    result = engine.inference(text="{escaped_text}")
 
     import soundfile as sf
     sf.write("{output_path}", result["audio"], result["sr"])
