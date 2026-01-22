@@ -101,11 +101,8 @@ def load_orpheus_model():
     try:
         from orpheus_tts import OrpheusModel
 
-        # Load Orpheus model
-        tts_model = OrpheusModel(
-            model_name="canopylabs/orpheus-tts-0.1-finetune-prod",
-            max_model_len=2048
-        )
+        # Load Orpheus model (simple initialization)
+        tts_model = OrpheusModel(model_name="canopylabs/orpheus-tts-0.1-finetune-prod")
 
         load_time = time.time() - start
         logger.info(f"Orpheus TTS model loaded in {load_time:.1f}s on {DEVICE}")
