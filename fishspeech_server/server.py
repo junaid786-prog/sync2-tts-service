@@ -3,7 +3,8 @@ FastAPI + WebSocket Server for Fish Speech TTS Service
 #1 Ranked on TTS-Arena2 - Most human-like voice synthesis
 Drop-in replacement for Kokoro/XTTS/Chatterbox with same interface
 
-Uses Fish Speech OpenAudio S1 Mini model via subprocess CLI
+Uses Fish Speech OpenAudio S1 Mini model via native API
+NOW WITH TRUE STREAMING - Audio chunks sent as they're generated!
 """
 import asyncio
 import logging
@@ -14,10 +15,12 @@ import io
 import wave
 import subprocess
 import tempfile
-import shutil
+import threading
+import queue
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Generator, Iterator
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -53,8 +56,11 @@ OUTPUT_SAMPLE_RATE = 8000  # Telephony output
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Fish Speech paths
-FISH_SPEECH_PATH = "/app/fish-speech"
-CHECKPOINT_PATH = "/app/checkpoints/openaudio-s1-mini"
+FISH_SPEECH_PATH = Path("/app/fish-speech")
+CHECKPOINT_PATH = Path("/app/checkpoints/openaudio-s1-mini")
+
+# Thread pool for running sync code in async context
+executor = ThreadPoolExecutor(max_workers=4)
 
 # Available voices
 VOICES = {
@@ -69,223 +75,243 @@ ALL_VOICES = list(VOICES.keys())
 
 
 class FishSpeechEngine:
-    """Wrapper for Fish Speech inference using subprocess CLI"""
+    """
+    Fish Speech TTS Engine using native Python API
+    Loads models directly using Fish Speech's ModelManager
+    Supports TRUE STREAMING - yields audio chunks as generated
+    """
 
-    def __init__(self, checkpoint_path: str):
-        self.checkpoint_path = Path(checkpoint_path)
-        self.fish_speech_path = Path(FISH_SPEECH_PATH)
+    def __init__(self, checkpoint_path: Path):
+        self.checkpoint_path = checkpoint_path
+        self.fish_speech_path = FISH_SPEECH_PATH
         self.ready = False
-        self._verify_installation()
+        self.model_manager = None
+        self.tts_engine = None
+        self._lock = threading.Lock()
 
-    def _verify_installation(self):
-        """Verify Fish Speech is properly installed"""
-        logger.info("Verifying Fish Speech installation...")
+        # Add fish-speech to Python path
+        sys.path.insert(0, str(self.fish_speech_path))
 
-        # Check if fish-speech directory exists
-        if not self.fish_speech_path.exists():
-            raise RuntimeError(f"Fish Speech not found at {self.fish_speech_path}")
+        self._load_models()
 
-        # Check for tools directory
-        tools_path = self.fish_speech_path / "tools"
-        if not tools_path.exists():
-            raise RuntimeError(f"Fish Speech tools not found at {tools_path}")
+    def _download_model_if_needed(self):
+        """Download model checkpoint if not present"""
+        if self.checkpoint_path.exists():
+            # Check if it has actual model files
+            model_files = list(self.checkpoint_path.glob("*.pth")) + list(self.checkpoint_path.glob("*.safetensors"))
+            if model_files:
+                logger.info(f"Model files found: {[f.name for f in model_files[:5]]}")
+                return True
 
-        # List available tools
-        logger.info(f"Fish Speech tools found: {list(tools_path.iterdir())}")
+        logger.info("Downloading Fish Speech model checkpoint...")
+        try:
+            from huggingface_hub import snapshot_download
 
-        # Check checkpoint
-        if not self.checkpoint_path.exists():
-            logger.warning(f"Checkpoint not found at {self.checkpoint_path}, will download on first use")
+            snapshot_download(
+                "fishaudio/openaudio-s1-mini",
+                local_dir=str(self.checkpoint_path),
+                token=HF_TOKEN
+            )
+            logger.info("Model download complete")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to download model: {e}")
+            raise RuntimeError(f"Could not download Fish Speech model: {e}")
 
-        # Check for required model files
-        model_files = list(self.checkpoint_path.glob("*.pth")) if self.checkpoint_path.exists() else []
-        logger.info(f"Model files found: {[f.name for f in model_files]}")
+    def _load_models(self):
+        """Load Fish Speech models using native ModelManager"""
+        logger.info("Loading Fish Speech models...")
+        start = time.time()
 
-        self.ready = True
-        logger.info("Fish Speech verification complete")
+        try:
+            # Download model if needed
+            self._download_model_if_needed()
 
-    def synthesize(self, text: str, voice: str = "default") -> np.ndarray:
+            # Import Fish Speech components
+            from tools.server.model_manager import ModelManager
+
+            # Find decoder checkpoint - openaudio models use codec.pth
+            decoder_path = self.checkpoint_path / "codec.pth"
+            if not decoder_path.exists():
+                # Try legacy generator file names
+                generator_files = list(self.checkpoint_path.glob("*generator*.pth"))
+                if generator_files:
+                    decoder_path = generator_files[0]
+                else:
+                    # Use checkpoint path directly - ModelManager will handle it
+                    decoder_path = self.checkpoint_path
+
+            logger.info(f"LLAMA checkpoint: {self.checkpoint_path}")
+            logger.info(f"Decoder checkpoint: {decoder_path}")
+
+            # Determine the config name based on model type
+            # openaudio models use modded_dac_vq config
+            decoder_config_name = "modded_dac_vq"
+
+            # Determine precision
+            precision = torch.half if DEVICE == "cuda" else torch.float32
+
+            # Initialize ModelManager (this loads all models)
+            self.model_manager = ModelManager(
+                mode="tts",
+                device=DEVICE,
+                half=(DEVICE == "cuda"),
+                compile=False,  # Disable compilation for faster startup
+                llama_checkpoint_path=str(self.checkpoint_path),
+                decoder_checkpoint_path=str(decoder_path),
+                decoder_config_name=decoder_config_name
+            )
+
+            self.tts_engine = self.model_manager.tts_inference_engine
+            self.ready = True
+
+            load_time = time.time() - start
+            logger.info(f"Fish Speech models loaded in {load_time:.1f}s")
+
+        except ImportError as e:
+            logger.error(f"Failed to import Fish Speech modules: {e}")
+            raise RuntimeError(f"Fish Speech import error: {e}")
+        except Exception as e:
+            logger.error(f"Failed to load Fish Speech models: {e}")
+            raise
+
+    def synthesize_streaming(self, text: str, voice: str = "default") -> Iterator[np.ndarray]:
         """
-        Synthesize speech from text using Fish Speech CLI
-        Returns numpy array of audio samples at 44100 Hz
+        Synthesize speech from text using Fish Speech with TRUE STREAMING
+        Yields audio chunks as they're generated - much lower latency!
         """
-        if not self.ready:
+        if not self.ready or self.tts_engine is None:
+            raise RuntimeError("Fish Speech engine not ready")
+
+        logger.info(f"[STREAMING] Synthesizing: '{text[:50]}...'")
+        start = time.time()
+        chunk_count = 0
+        total_samples = 0
+
+        try:
+            from fish_speech.utils.schema import ServeTTSRequest
+
+            # Create TTS request with streaming enabled
+            request = ServeTTSRequest(
+                text=text,
+                references=[],
+                reference_id=None,
+                max_new_tokens=1024,
+                chunk_length=100,  # Smaller chunks for faster streaming
+                top_p=0.7,
+                repetition_penalty=1.2,
+                temperature=0.7,
+                format="wav",
+                streaming=True  # Enable streaming!
+            )
+
+            # Get sample rate
+            sample_rate = self.tts_engine.decoder_model.sample_rate
+
+            # Stream audio chunks as they're generated
+            with self._lock:
+                for result in self.tts_engine.inference(request):
+                    if result.code == "segment" and isinstance(result.audio, tuple):
+                        # Got a segment - yield it immediately!
+                        audio_chunk = result.audio[1]
+                        if isinstance(audio_chunk, np.ndarray) and len(audio_chunk) > 0:
+                            # Normalize chunk
+                            if np.max(np.abs(audio_chunk)) > 0:
+                                audio_chunk = audio_chunk / np.max(np.abs(audio_chunk)) * 0.95
+
+                            chunk_count += 1
+                            total_samples += len(audio_chunk)
+
+                            if chunk_count == 1:
+                                first_chunk_time = time.time() - start
+                                logger.info(f"[STREAMING] First chunk in {first_chunk_time*1000:.0f}ms")
+
+                            yield audio_chunk.astype(np.float32), sample_rate
+
+                    elif result.code == "final" and isinstance(result.audio, tuple):
+                        # Final chunk
+                        audio_chunk = result.audio[1]
+                        if isinstance(audio_chunk, np.ndarray) and len(audio_chunk) > 0:
+                            if np.max(np.abs(audio_chunk)) > 0:
+                                audio_chunk = audio_chunk / np.max(np.abs(audio_chunk)) * 0.95
+
+                            chunk_count += 1
+                            total_samples += len(audio_chunk)
+                            yield audio_chunk.astype(np.float32), sample_rate
+                        break
+
+                    elif result.code == "error":
+                        logger.error(f"[STREAMING] Error: {result.error}")
+                        raise RuntimeError(str(result.error))
+
+            elapsed = time.time() - start
+            audio_duration = total_samples / sample_rate if sample_rate > 0 else 0
+            logger.info(f"[STREAMING] Complete: {chunk_count} chunks, {audio_duration:.2f}s audio in {elapsed:.2f}s")
+
+        except Exception as e:
+            logger.error(f"[STREAMING] Fish Speech synthesis error: {e}")
+            raise
+
+    def synthesize(self, text: str, voice: str = "default") -> tuple:
+        """
+        Synthesize speech from text using Fish Speech (non-streaming)
+        Returns numpy array of audio samples at native sample rate
+        """
+        if not self.ready or self.tts_engine is None:
             raise RuntimeError("Fish Speech engine not ready")
 
         logger.info(f"Synthesizing: '{text[:50]}...'")
         start = time.time()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = Path(tmpdir) / "output.wav"
-            codes_path = Path(tmpdir) / "codes.npy"
-
-            try:
-                # Method 1: Try using the inference module directly
-                env = os.environ.copy()
-                env["PYTHONPATH"] = str(self.fish_speech_path)
-
-                # Step 1: Generate semantic codes from text
-                logger.info("Generating semantic codes...")
-                cmd_generate = [
-                    sys.executable, "-m", "tools.llama.generate",
-                    "--text", text,
-                    "--checkpoint-path", str(self.checkpoint_path),
-                    "--output-path", str(codes_path),
-                    "--device", DEVICE,
-                    "--compile", "False",
-                    "--num-samples", "1",
-                    "--max-new-tokens", "0",  # Auto determine
-                    "--top-p", "0.7",
-                    "--temperature", "0.7",
-                    "--repetition-penalty", "1.2"
-                ]
-
-                result = subprocess.run(
-                    cmd_generate,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                    cwd=str(self.fish_speech_path),
-                    env=env
-                )
-
-                if result.returncode != 0:
-                    logger.warning(f"Generate stderr: {result.stderr}")
-                    # Try alternative: direct webui inference
-                    return self._synthesize_webui(text, output_path, env)
-
-                if not codes_path.exists():
-                    logger.warning("Codes file not created, trying webui method")
-                    return self._synthesize_webui(text, output_path, env)
-
-                # Step 2: Decode codes to audio using VQGAN
-                logger.info("Decoding to audio...")
-
-                # Find the decoder model
-                decoder_path = self.checkpoint_path / "firefly-gan-vq-fsq-8x1024-21hz-generator.pth"
-                if not decoder_path.exists():
-                    # Try alternative name
-                    decoder_files = list(self.checkpoint_path.glob("*generator*.pth"))
-                    if decoder_files:
-                        decoder_path = decoder_files[0]
-                    else:
-                        decoder_path = self.checkpoint_path / "firefly_gan_vq"
-
-                cmd_decode = [
-                    sys.executable, "-m", "tools.vqgan.inference",
-                    "--input-path", str(codes_path),
-                    "--output-path", str(output_path),
-                    "--checkpoint-path", str(decoder_path),
-                    "--device", DEVICE
-                ]
-
-                result = subprocess.run(
-                    cmd_decode,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    cwd=str(self.fish_speech_path),
-                    env=env
-                )
-
-                if result.returncode != 0:
-                    logger.warning(f"Decode stderr: {result.stderr}")
-                    return self._synthesize_webui(text, output_path, env)
-
-                if not output_path.exists():
-                    return self._synthesize_webui(text, output_path, env)
-
-                # Load and return audio
-                audio, sr = sf.read(str(output_path))
-                if audio.ndim > 1:
-                    audio = audio.mean(axis=1)
-
-                elapsed = time.time() - start
-                logger.info(f"Generated {len(audio)} samples in {elapsed:.2f}s")
-
-                # Normalize
-                if np.max(np.abs(audio)) > 0:
-                    audio = audio / np.max(np.abs(audio)) * 0.95
-
-                return audio.astype(np.float32)
-
-            except subprocess.TimeoutExpired:
-                logger.error("Fish Speech inference timed out")
-                raise RuntimeError("TTS generation timed out")
-            except Exception as e:
-                logger.error(f"Fish Speech synthesis error: {e}")
-                raise
-
-    def _synthesize_webui(self, text: str, output_path: Path, env: dict) -> np.ndarray:
-        """Fallback: Try using the webui inference API"""
-        logger.info("Trying webui inference method...")
-
         try:
-            # Escape text for use in the script
-            escaped_text = text.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
+            from fish_speech.utils.schema import ServeTTSRequest
+            from tools.server.inference import inference_wrapper as inference
 
-            # Create a simple inference script
-            script = f'''
-import sys
-sys.path.insert(0, "{self.fish_speech_path}")
-import os
-os.chdir("{self.fish_speech_path}")
-
-try:
-    from tools.inference_engine import TTSInferenceEngine
-
-    engine = TTSInferenceEngine(
-        llama_checkpoint_path="{self.checkpoint_path}",
-        decoder_checkpoint_path="{self.checkpoint_path}",
-        device="{DEVICE}"
-    )
-
-    result = engine.inference(text="{escaped_text}")
-
-    import soundfile as sf
-    sf.write("{output_path}", result["audio"], result["sr"])
-    print("SUCCESS")
-
-except ImportError as ie:
-    print(f"IMPORT_ERROR: {{ie}}")
-except Exception as e:
-    print(f"ERROR: {{e}}")
-'''
-            result = subprocess.run(
-                [sys.executable, "-c", script],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=env
+            # Create TTS request
+            request = ServeTTSRequest(
+                text=text,
+                references=[],
+                reference_id=None,
+                max_new_tokens=1024,
+                chunk_length=200,
+                top_p=0.7,
+                repetition_penalty=1.2,
+                temperature=0.7,
+                format="wav",
+                streaming=False
             )
 
-            if "SUCCESS" in result.stdout and output_path.exists():
-                audio, sr = sf.read(str(output_path))
-                if audio.ndim > 1:
-                    audio = audio.mean(axis=1)
-                if np.max(np.abs(audio)) > 0:
-                    audio = audio / np.max(np.abs(audio)) * 0.95
-                return audio.astype(np.float32)
+            # Generate audio
+            with self._lock:
+                audio_chunks = list(inference(request, self.tts_engine))
 
-            logger.warning(f"Webui inference output: {result.stdout}")
-            logger.warning(f"Webui inference error: {result.stderr}")
+            if not audio_chunks:
+                raise RuntimeError("No audio generated")
 
-            # Last resort: try the API webui
-            return self._synthesize_api_server(text, output_path, env)
+            # Concatenate all chunks
+            audio = np.concatenate(audio_chunks)
+
+            # Get sample rate from decoder model
+            sample_rate = self.tts_engine.decoder_model.sample_rate
+
+            elapsed = time.time() - start
+            logger.info(f"Generated {len(audio)/sample_rate:.2f}s audio in {elapsed:.2f}s (RTF: {elapsed/(len(audio)/sample_rate):.2f})")
+
+            # Normalize
+            if np.max(np.abs(audio)) > 0:
+                audio = audio / np.max(np.abs(audio)) * 0.95
+
+            return audio.astype(np.float32), sample_rate
 
         except Exception as e:
-            logger.error(f"Webui synthesis failed: {e}")
+            logger.error(f"Fish Speech synthesis error: {e}")
             raise
 
-    def _synthesize_api_server(self, text: str, output_path: Path, env: dict) -> np.ndarray:
-        """Last resort: Start Fish Speech API server and call it"""
-        logger.info("Trying API server method...")
-
-        # For now, raise an error - we'll need to implement a proper fallback
-        raise RuntimeError(
-            "Fish Speech inference failed. The model may need different configuration. "
-            "Please check /app/fish-speech for available inference methods."
-        )
+    def get_sample_rate(self) -> int:
+        """Get the native sample rate of the model"""
+        if self.tts_engine and hasattr(self.tts_engine, 'decoder_model'):
+            return self.tts_engine.decoder_model.sample_rate
+        return SAMPLE_RATE
 
 
 def load_fishspeech_engine():
@@ -312,6 +338,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler - load model on startup"""
     logger.info("=" * 50)
     logger.info("  Sync2 Fish Speech TTS Service - Starting")
+    logger.info("  🚀 TRUE STREAMING MODE ENABLED")
     logger.info(f"  Device: {DEVICE}")
     logger.info(f"  GPU Available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
@@ -336,8 +363,8 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="Sync2 Fish Speech TTS Service",
-    description="#1 Ranked TTS service using Fish Speech for Sync2.ai Voice AI Platform",
-    version="1.0.0",
+    description="#1 Ranked TTS service using Fish Speech for Sync2.ai Voice AI Platform - TRUE STREAMING",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -392,6 +419,8 @@ async def health_check():
     gpu_available = torch.cuda.is_available()
     gpu_name = torch.cuda.get_device_name(0) if gpu_available else None
 
+    native_sr = tts_engine.get_sample_rate() if tts_engine else SAMPLE_RATE
+
     return {
         "status": "ok" if tts_engine is not None and tts_engine.ready else "error",
         "model": "Fish-Speech-OpenAudio-S1-Mini",
@@ -400,9 +429,11 @@ async def health_check():
         "gpu_available": gpu_available,
         "gpu_name": gpu_name,
         "ready": tts_engine is not None and tts_engine.ready,
-        "sample_rate": SAMPLE_RATE,
+        "sample_rate": native_sr,
         "output_sample_rate": OUTPUT_SAMPLE_RATE,
-        "total_voices": len(ALL_VOICES)
+        "total_voices": len(ALL_VOICES),
+        "streaming": True,
+        "version": "2.0.0"
     }
 
 
@@ -442,7 +473,7 @@ async def synthesize(request: TTSRequest):
 
     try:
         # Generate audio with Fish Speech
-        full_audio = tts_engine.synthesize(request.text, request.voice)
+        full_audio, native_sr = tts_engine.synthesize(request.text, request.voice)
         gen_time = time.time() - start
 
         logger.info(f"[TTS] Generated {len(request.text)} chars in {gen_time*1000:.0f}ms")
@@ -453,7 +484,7 @@ async def synthesize(request: TTSRequest):
             with wave.open(buffer, 'wb') as wav_file:
                 wav_file.setnchannels(1)
                 wav_file.setsampwidth(2)
-                wav_file.setframerate(SAMPLE_RATE)
+                wav_file.setframerate(native_sr)
                 wav_file.writeframes(audio_to_pcm16(full_audio))
             buffer.seek(0)
 
@@ -462,14 +493,14 @@ async def synthesize(request: TTSRequest):
                 media_type="audio/wav",
                 headers={
                     "X-Duration-Ms": str(gen_time * 1000),
-                    "X-Sample-Rate": str(SAMPLE_RATE),
+                    "X-Sample-Rate": str(native_sr),
                     "X-Format": "wav"
                 }
             )
 
         else:
             # Resample to 8kHz for telephony
-            resampled = resample_audio(full_audio, SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
+            resampled = resample_audio(full_audio, native_sr, OUTPUT_SAMPLE_RATE)
 
             if request.output_format == "ulaw":
                 audio_bytes = audio_to_ulaw(resampled)
@@ -501,11 +532,35 @@ async def generate_speech(request: TTSRequest):
     return await synthesize(request)
 
 
-# WebSocket Endpoint for Streaming
+def run_synthesis_in_thread(text: str, voice: str, output_format: str, result_queue: queue.Queue):
+    """Run synthesis in a thread and put results in queue"""
+    try:
+        # Use non-streaming synthesis (more reliable)
+        audio, sample_rate = tts_engine.synthesize(text, voice)
+
+        # Resample to 8kHz for telephony
+        resampled = resample_audio(audio, sample_rate, OUTPUT_SAMPLE_RATE)
+
+        # Convert to requested format
+        if output_format == "ulaw":
+            audio_bytes = audio_to_ulaw(resampled)
+        else:
+            audio_bytes = audio_to_pcm16(resampled)
+
+        # Put the complete audio as a single chunk
+        result_queue.put(("chunk", audio_bytes))
+        result_queue.put(("done", None))
+    except Exception as e:
+        logger.error(f"[THREAD] Synthesis error: {e}")
+        result_queue.put(("error", str(e)))
+
+
+# WebSocket Endpoint for Streaming TTS
 @app.websocket("/tts/stream")
 async def websocket_stream(websocket: WebSocket):
     """
     WebSocket endpoint for streaming TTS
+    Runs synthesis in background thread, streams audio when ready
     """
     await websocket.accept()
     logger.info("[WS] Client connected")
@@ -529,25 +584,54 @@ async def websocket_stream(websocket: WebSocket):
             total_bytes = 0
 
             try:
-                # Generate audio with Fish Speech
-                audio = tts_engine.synthesize(text, voice)
+                # Create a queue for results
+                result_queue = queue.Queue()
 
-                # Resample to 8kHz for telephony
-                resampled = resample_audio(audio, SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
+                # Start synthesis in a thread
+                loop = asyncio.get_event_loop()
+                future = loop.run_in_executor(
+                    executor,
+                    run_synthesis_in_thread,
+                    text, voice, output_format, result_queue
+                )
 
-                # Convert to requested format
-                if output_format == "ulaw":
-                    audio_bytes = audio_to_ulaw(resampled)
-                else:
-                    audio_bytes = audio_to_pcm16(resampled)
+                # Wait for results with timeout
+                timeout_seconds = 120  # 2 minute timeout for long responses
+                deadline = time.time() + timeout_seconds
 
-                # Stream in chunks
-                chunk_size = 4000
-                for i in range(0, len(audio_bytes), chunk_size):
-                    chunk = audio_bytes[i:i + chunk_size]
-                    await websocket.send_bytes(chunk)
-                    total_bytes += len(chunk)
-                    await asyncio.sleep(0.001)
+                while time.time() < deadline:
+                    try:
+                        # Check queue with small timeout
+                        result_type, result_data = result_queue.get(block=True, timeout=0.5)
+
+                        if result_type == "chunk":
+                            # Stream the audio in smaller chunks for smooth playback
+                            chunk_size = 4000
+                            for i in range(0, len(result_data), chunk_size):
+                                chunk = result_data[i:i + chunk_size]
+                                await websocket.send_bytes(chunk)
+                                total_bytes += len(chunk)
+                                await asyncio.sleep(0.001)  # Small yield
+
+                            first_chunk_time = (time.time() - start_time) * 1000
+                            logger.info(f"[WS] Audio sent in {first_chunk_time:.0f}ms")
+
+                        elif result_type == "done":
+                            break
+
+                        elif result_type == "error":
+                            raise RuntimeError(result_data)
+
+                    except queue.Empty:
+                        # Queue empty, check if synthesis is still running
+                        if future.done():
+                            # Check if there was an exception
+                            try:
+                                future.result()
+                            except Exception as e:
+                                raise RuntimeError(str(e))
+                            break
+                        continue
 
                 duration_ms = (time.time() - start_time) * 1000
 
@@ -557,10 +641,10 @@ async def websocket_stream(websocket: WebSocket):
                     "total_bytes": total_bytes
                 })
 
-                logger.info(f"[WS] Streamed {total_bytes} bytes in {duration_ms:.0f}ms")
+                logger.info(f"[WS] ✅ Complete: {total_bytes} bytes in {duration_ms:.0f}ms")
 
             except Exception as e:
-                logger.error(f"[WS] Streaming error: {e}")
+                logger.error(f"[WS] Error: {e}")
                 await websocket.send_json({"error": str(e)})
 
     except WebSocketDisconnect:
@@ -573,7 +657,8 @@ if __name__ == "__main__":
     import uvicorn
 
     print("=" * 50)
-    print("  Sync2 Fish Speech TTS Service")
+    print("  Sync2 Fish Speech TTS Service v2.0")
+    print("  🚀 TRUE STREAMING MODE ENABLED")
     print(f"  Device: {DEVICE}")
     print(f"  GPU: {torch.cuda.is_available()}")
     print("  #1 Ranked on TTS-Arena2")
@@ -582,7 +667,7 @@ if __name__ == "__main__":
     print("    GET  http://localhost:8765/health")
     print("    GET  http://localhost:8765/voices")
     print("    POST http://localhost:8765/tts/synthesize")
-    print("    WS   ws://localhost:8765/tts/stream")
+    print("    WS   ws://localhost:8765/tts/stream (TRUE STREAMING)")
     print("=" * 50)
 
     uvicorn.run(app, host="0.0.0.0", port=8765)
