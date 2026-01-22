@@ -10,7 +10,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/app/models \
-    TRANSFORMERS_CACHE=/app/models
+    TRANSFORMERS_CACHE=/app/models \
+    PYTHONPATH=/app/fish-speech
 
 # Install system dependencies (use Python 3.11 available in Ubuntu 22.04)
 RUN apt-get update && apt-get install -y --no-install-recommends \

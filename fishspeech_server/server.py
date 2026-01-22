@@ -2,6 +2,8 @@
 FastAPI + WebSocket Server for Fish Speech TTS Service
 #1 Ranked on TTS-Arena2 - Most human-like voice synthesis
 Drop-in replacement for Kokoro/XTTS/Chatterbox with same interface
+
+Uses Fish Speech OpenAudio S1 Mini model via subprocess CLI
 """
 import asyncio
 import logging
@@ -12,6 +14,7 @@ import io
 import wave
 import subprocess
 import tempfile
+import shutil
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -49,21 +52,14 @@ OUTPUT_SAMPLE_RATE = 8000  # Telephony output
 # Device configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Fish Speech checkpoint path
+# Fish Speech paths
+FISH_SPEECH_PATH = "/app/fish-speech"
 CHECKPOINT_PATH = "/app/checkpoints/openaudio-s1-mini"
 
-# Available voices (can be expanded with reference audio files)
+# Available voices
 VOICES = {
     "default": {
         "description": "Fish Speech Default Voice",
-        "language": "en"
-    },
-    "female_warm": {
-        "description": "Female - Warm and natural",
-        "language": "en"
-    },
-    "male_professional": {
-        "description": "Male - Professional",
         "language": "en"
     }
 }
@@ -73,134 +69,220 @@ ALL_VOICES = list(VOICES.keys())
 
 
 class FishSpeechEngine:
-    """Wrapper for Fish Speech inference"""
+    """Wrapper for Fish Speech inference using subprocess CLI"""
 
     def __init__(self, checkpoint_path: str):
-        self.checkpoint_path = checkpoint_path
-        self.model = None
-        self.codec = None
-        self._load_models()
+        self.checkpoint_path = Path(checkpoint_path)
+        self.fish_speech_path = Path(FISH_SPEECH_PATH)
+        self.ready = False
+        self._verify_installation()
 
-    def _load_models(self):
-        """Load Fish Speech models"""
-        logger.info("Loading Fish Speech models...")
-        start = time.time()
+    def _verify_installation(self):
+        """Verify Fish Speech is properly installed"""
+        logger.info("Verifying Fish Speech installation...")
 
-        try:
-            # Add fish-speech to path
-            sys.path.insert(0, '/app/fish-speech')
+        # Check if fish-speech directory exists
+        if not self.fish_speech_path.exists():
+            raise RuntimeError(f"Fish Speech not found at {self.fish_speech_path}")
 
-            from fish_speech.models.text2semantic.llama import BaseModelArgs
-            from fish_speech.models.dac.modded_dac import DAC
+        # Check for tools directory
+        tools_path = self.fish_speech_path / "tools"
+        if not tools_path.exists():
+            raise RuntimeError(f"Fish Speech tools not found at {tools_path}")
 
-            # Load codec model
-            codec_path = Path(self.checkpoint_path) / "codec.pth"
-            if codec_path.exists():
-                self.codec = DAC.load(str(codec_path))
-                self.codec.to(DEVICE)
-                self.codec.eval()
-                logger.info("Codec model loaded")
+        # List available tools
+        logger.info(f"Fish Speech tools found: {list(tools_path.iterdir())}")
 
-            # Load text2semantic model
-            llama_path = Path(self.checkpoint_path) / "model.pth"
-            if llama_path.exists():
-                # Model loading handled by fish_speech internals
-                logger.info("Text2Semantic model ready")
+        # Check checkpoint
+        if not self.checkpoint_path.exists():
+            logger.warning(f"Checkpoint not found at {self.checkpoint_path}, will download on first use")
 
-            load_time = time.time() - start
-            logger.info(f"Fish Speech models loaded in {load_time:.1f}s")
+        # Check for required model files
+        model_files = list(self.checkpoint_path.glob("*.pth")) if self.checkpoint_path.exists() else []
+        logger.info(f"Model files found: {[f.name for f in model_files]}")
 
-        except Exception as e:
-            logger.warning(f"Could not load Fish Speech models directly: {e}")
-            logger.info("Will use command-line inference instead")
+        self.ready = True
+        logger.info("Fish Speech verification complete")
 
     def synthesize(self, text: str, voice: str = "default") -> np.ndarray:
         """
-        Synthesize speech from text using Fish Speech
-        Returns numpy array of audio samples
+        Synthesize speech from text using Fish Speech CLI
+        Returns numpy array of audio samples at 44100 Hz
         """
+        if not self.ready:
+            raise RuntimeError("Fish Speech engine not ready")
+
+        logger.info(f"Synthesizing: '{text[:50]}...'")
+        start = time.time()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "output.wav"
+            codes_path = Path(tmpdir) / "codes.npy"
+
+            try:
+                # Method 1: Try using the inference module directly
+                env = os.environ.copy()
+                env["PYTHONPATH"] = str(self.fish_speech_path)
+
+                # Step 1: Generate semantic codes from text
+                logger.info("Generating semantic codes...")
+                cmd_generate = [
+                    sys.executable, "-m", "tools.llama.generate",
+                    "--text", text,
+                    "--checkpoint-path", str(self.checkpoint_path),
+                    "--output-path", str(codes_path),
+                    "--device", DEVICE,
+                    "--compile", "False",
+                    "--num-samples", "1",
+                    "--max-new-tokens", "0",  # Auto determine
+                    "--top-p", "0.7",
+                    "--temperature", "0.7",
+                    "--repetition-penalty", "1.2"
+                ]
+
+                result = subprocess.run(
+                    cmd_generate,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    cwd=str(self.fish_speech_path),
+                    env=env
+                )
+
+                if result.returncode != 0:
+                    logger.warning(f"Generate stderr: {result.stderr}")
+                    # Try alternative: direct webui inference
+                    return self._synthesize_webui(text, output_path, env)
+
+                if not codes_path.exists():
+                    logger.warning("Codes file not created, trying webui method")
+                    return self._synthesize_webui(text, output_path, env)
+
+                # Step 2: Decode codes to audio using VQGAN
+                logger.info("Decoding to audio...")
+
+                # Find the decoder model
+                decoder_path = self.checkpoint_path / "firefly-gan-vq-fsq-8x1024-21hz-generator.pth"
+                if not decoder_path.exists():
+                    # Try alternative name
+                    decoder_files = list(self.checkpoint_path.glob("*generator*.pth"))
+                    if decoder_files:
+                        decoder_path = decoder_files[0]
+                    else:
+                        decoder_path = self.checkpoint_path / "firefly_gan_vq"
+
+                cmd_decode = [
+                    sys.executable, "-m", "tools.vqgan.inference",
+                    "--input-path", str(codes_path),
+                    "--output-path", str(output_path),
+                    "--checkpoint-path", str(decoder_path),
+                    "--device", DEVICE
+                ]
+
+                result = subprocess.run(
+                    cmd_decode,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    cwd=str(self.fish_speech_path),
+                    env=env
+                )
+
+                if result.returncode != 0:
+                    logger.warning(f"Decode stderr: {result.stderr}")
+                    return self._synthesize_webui(text, output_path, env)
+
+                if not output_path.exists():
+                    return self._synthesize_webui(text, output_path, env)
+
+                # Load and return audio
+                audio, sr = sf.read(str(output_path))
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+
+                elapsed = time.time() - start
+                logger.info(f"Generated {len(audio)} samples in {elapsed:.2f}s")
+
+                # Normalize
+                if np.max(np.abs(audio)) > 0:
+                    audio = audio / np.max(np.abs(audio)) * 0.95
+
+                return audio.astype(np.float32)
+
+            except subprocess.TimeoutExpired:
+                logger.error("Fish Speech inference timed out")
+                raise RuntimeError("TTS generation timed out")
+            except Exception as e:
+                logger.error(f"Fish Speech synthesis error: {e}")
+                raise
+
+    def _synthesize_webui(self, text: str, output_path: Path, env: dict) -> np.ndarray:
+        """Fallback: Try using the webui inference API"""
+        logger.info("Trying webui inference method...")
+
         try:
-            # Use Fish Speech's built-in inference
-            with tempfile.TemporaryDirectory() as tmpdir:
-                output_path = Path(tmpdir) / "output.wav"
+            # Create a simple inference script
+            script = f'''
+import sys
+sys.path.insert(0, "{self.fish_speech_path}")
+import os
+os.chdir("{self.fish_speech_path}")
 
-                # Try using the Python API first
-                try:
-                    return self._synthesize_api(text, voice, output_path)
-                except Exception as e:
-                    logger.warning(f"API synthesis failed, trying CLI: {e}")
-                    return self._synthesize_cli(text, voice, output_path)
+try:
+    from tools.inference_engine import TTSInferenceEngine
 
-        except Exception as e:
-            logger.error(f"Fish Speech synthesis error: {e}")
-            raise
+    engine = TTSInferenceEngine(
+        llama_checkpoint_path="{self.checkpoint_path}",
+        decoder_checkpoint_path="{self.checkpoint_path}",
+        device="{DEVICE}"
+    )
 
-    def _synthesize_api(self, text: str, voice: str, output_path: Path) -> np.ndarray:
-        """Synthesize using Fish Speech Python API"""
-        sys.path.insert(0, '/app/fish-speech')
+    result = engine.inference(text="{text.replace('"', '\\"')}")
 
-        from fish_speech.inference import TextToSpeech
+    import soundfile as sf
+    sf.write("{output_path}", result["audio"], result["sr"])
+    print("SUCCESS")
 
-        tts = TextToSpeech(
-            checkpoint_path=self.checkpoint_path,
-            device=DEVICE
-        )
-
-        # Generate speech
-        audio = tts.synthesize(text)
-
-        # Convert to numpy
-        if torch.is_tensor(audio):
-            audio = audio.cpu().numpy()
-
-        if audio.ndim > 1:
-            audio = audio.squeeze()
-
-        # Normalize
-        if np.max(np.abs(audio)) > 0:
-            audio = audio / np.max(np.abs(audio)) * 0.95
-
-        return audio.astype(np.float32)
-
-    def _synthesize_cli(self, text: str, voice: str, output_path: Path) -> np.ndarray:
-        """Synthesize using Fish Speech CLI as fallback"""
-        import subprocess
-
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write(text)
-            text_file = f.name
-
-        try:
-            # Run Fish Speech inference
-            cmd = [
-                "python", "-m", "fish_speech.tools.inference",
-                "--text", text,
-                "--checkpoint-path", self.checkpoint_path,
-                "--output", str(output_path),
-                "--device", DEVICE
-            ]
-
+except ImportError as ie:
+    print(f"IMPORT_ERROR: {{ie}}")
+except Exception as e:
+    print(f"ERROR: {{e}}")
+'''
             result = subprocess.run(
-                cmd,
+                [sys.executable, "-c", script],
                 capture_output=True,
                 text=True,
-                timeout=60,
-                cwd="/app/fish-speech"
+                timeout=120,
+                env=env
             )
 
-            if result.returncode != 0:
-                raise RuntimeError(f"Fish Speech CLI failed: {result.stderr}")
+            if "SUCCESS" in result.stdout and output_path.exists():
+                audio, sr = sf.read(str(output_path))
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+                if np.max(np.abs(audio)) > 0:
+                    audio = audio / np.max(np.abs(audio)) * 0.95
+                return audio.astype(np.float32)
 
-            # Load generated audio
-            audio, sr = sf.read(str(output_path))
+            logger.warning(f"Webui inference output: {result.stdout}")
+            logger.warning(f"Webui inference error: {result.stderr}")
 
-            if audio.ndim > 1:
-                audio = audio.mean(axis=1)
+            # Last resort: try the API webui
+            return self._synthesize_api_server(text, output_path, env)
 
-            return audio.astype(np.float32)
+        except Exception as e:
+            logger.error(f"Webui synthesis failed: {e}")
+            raise
 
-        finally:
-            os.unlink(text_file)
+    def _synthesize_api_server(self, text: str, output_path: Path, env: dict) -> np.ndarray:
+        """Last resort: Start Fish Speech API server and call it"""
+        logger.info("Trying API server method...")
+
+        # For now, raise an error - we'll need to implement a proper fallback
+        raise RuntimeError(
+            "Fish Speech inference failed. The model may need different configuration. "
+            "Please check /app/fish-speech for available inference methods."
+        )
 
 
 def load_fishspeech_engine():
@@ -214,7 +296,7 @@ def load_fishspeech_engine():
         tts_engine = FishSpeechEngine(CHECKPOINT_PATH)
 
         load_time = time.time() - start
-        logger.info(f"Fish Speech TTS loaded in {load_time:.1f}s on {DEVICE}")
+        logger.info(f"Fish Speech TTS engine ready in {load_time:.1f}s")
 
         return True
     except Exception as e:
@@ -231,15 +313,17 @@ async def lifespan(app: FastAPI):
     logger.info(f"  GPU Available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         logger.info(f"  GPU Name: {torch.cuda.get_device_name(0)}")
+    logger.info(f"  Fish Speech Path: {FISH_SPEECH_PATH}")
+    logger.info(f"  Checkpoint: {CHECKPOINT_PATH}")
     logger.info("=" * 50)
 
     try:
         load_fishspeech_engine()
         logger.info("Fish Speech TTS ready")
-        logger.info(f"Available voices: {len(ALL_VOICES)}")
     except Exception as e:
         logger.error(f"Failed to initialize Fish Speech TTS: {e}")
-        raise
+        # Don't raise - let the server start but report unhealthy
+        logger.warning("Server starting in degraded mode")
 
     yield
 
@@ -306,13 +390,13 @@ async def health_check():
     gpu_name = torch.cuda.get_device_name(0) if gpu_available else None
 
     return {
-        "status": "ok" if tts_engine is not None else "error",
-        "model": "Fish-Speech-V1.5",
-        "model_loaded": tts_engine is not None,
+        "status": "ok" if tts_engine is not None and tts_engine.ready else "error",
+        "model": "Fish-Speech-OpenAudio-S1-Mini",
+        "model_loaded": tts_engine is not None and tts_engine.ready,
         "device": DEVICE,
         "gpu_available": gpu_available,
         "gpu_name": gpu_name,
-        "ready": tts_engine is not None,
+        "ready": tts_engine is not None and tts_engine.ready,
         "sample_rate": SAMPLE_RATE,
         "output_sample_rate": OUTPUT_SAMPLE_RATE,
         "total_voices": len(ALL_VOICES)
@@ -347,6 +431,9 @@ async def synthesize(request: TTSRequest):
     """
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    if tts_engine is None or not tts_engine.ready:
+        raise HTTPException(status_code=503, detail="TTS engine not ready")
 
     start = time.time()
 
