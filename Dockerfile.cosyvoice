@@ -1,0 +1,81 @@
+# CosyVoice2-0.5B TTS Service
+# Ultra-low latency streaming TTS (~150ms first chunk)
+
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    libsndfile1 \
+    ffmpeg \
+    sox \
+    libsox-dev \
+    curl \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3
+
+# Upgrade pip
+RUN pip install --upgrade pip setuptools wheel
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app
+
+# Clone CosyVoice repository
+RUN git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git /app/CosyVoice
+
+# Install PyTorch with CUDA support
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# Install CosyVoice dependencies
+WORKDIR /app/CosyVoice
+RUN pip install --no-cache-dir -r requirements.txt || true
+
+# Install Matcha-TTS (required by CosyVoice)
+RUN cd /app/CosyVoice/third_party/Matcha-TTS && pip install --no-cache-dir -e . || true
+
+# Install additional dependencies
+WORKDIR /app
+COPY requirements.cosyvoice.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create directories
+RUN mkdir -p /app/models /app/cache /app/cosyvoice_server \
+    && chmod -R 777 /app/models /app/cache \
+    && chown -R appuser:appuser /app
+
+# Copy server code
+COPY cosyvoice_server/ ./cosyvoice_server/
+
+# Fix permissions
+RUN chown -R appuser:appuser /app
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app:/app/CosyVoice:/app/CosyVoice/third_party/Matcha-TTS
+ENV HF_HOME=/app/models/hub
+ENV TRANSFORMERS_CACHE=/app/models/hub
+ENV TORCH_HOME=/app/models/torch
+
+# Expose port
+EXPOSE 8765
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8765/health || exit 1
+
+# Run as non-root user
+USER appuser
+
+# Start server
+CMD ["python", "-m", "cosyvoice_server.server"]
