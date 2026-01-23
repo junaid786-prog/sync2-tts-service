@@ -145,6 +145,10 @@ class TTSRequest(BaseModel):
     speed: float = 1.0
     output_format: str = "wav"  # "wav", "pcm16", "ulaw"
     language: str = "en"
+    # Synthesis quality parameters for more realistic voices
+    temperature: float = 0.7  # Randomness (0.05-5.0): lower=consistent, higher=varied
+    cfg_weight: float = 0.5  # CFG scale (0.0-1.0): higher=strict/monotone, lower=expressive
+    exaggeration: float = 0.5  # Prosody intensity (0.0-1.0): higher=more emotional/expressive
 
 
 def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
@@ -172,10 +176,27 @@ def audio_to_ulaw(audio: np.ndarray) -> bytes:
     return audioop.lin2ulaw(pcm, 2)
 
 
-def synthesize_with_chatterbox(text: str, voice: str = "default", speed: float = 1.0) -> np.ndarray:
+def synthesize_with_chatterbox(
+    text: str,
+    voice: str = "default",
+    speed: float = 1.0,
+    temperature: float = 0.7,
+    cfg_weight: float = 0.5,
+    exaggeration: float = 0.5
+) -> np.ndarray:
     """
-    Synthesize speech using Chatterbox-Turbo
-    Returns numpy array of audio samples
+    Synthesize speech using Chatterbox-Turbo with quality parameters
+
+    Args:
+        text: Text to synthesize
+        voice: Voice name (or 'default')
+        speed: Speech speed multiplier (1.0 = normal)
+        temperature: Randomness (0.05-5.0) - lower=consistent, higher=varied
+        cfg_weight: CFG scale (0.0-1.0) - higher=strict/monotone, lower=expressive
+        exaggeration: Prosody intensity (0.0-1.0) - higher=more emotional
+
+    Returns:
+        numpy array of audio samples
     """
     global tts_model
 
@@ -192,16 +213,35 @@ def synthesize_with_chatterbox(text: str, voice: str = "default", speed: float =
             if voice_file.exists():
                 audio_prompt_path = str(voice_file)
 
-        # Generate audio with Chatterbox-Turbo
+        # Prepare generation parameters
+        gen_params = {"text": text}
+
+        # Add audio prompt if available
         if audio_prompt_path:
-            # Use voice cloning with reference audio
-            wav = tts_model.generate(
-                text=text,
-                audio_prompt_path=audio_prompt_path
-            )
-        else:
-            # Use default voice (no reference audio)
-            wav = tts_model.generate(text=text)
+            gen_params["audio_prompt_path"] = audio_prompt_path
+
+        # Try to add quality parameters (some may not be supported by Chatterbox-Turbo)
+        # We'll catch exceptions if they're not supported
+        try:
+            if hasattr(tts_model, 'generate'):
+                import inspect
+                sig = inspect.signature(tts_model.generate)
+
+                # Only add parameters that the model actually supports
+                if 'temperature' in sig.parameters:
+                    gen_params['temperature'] = temperature
+                if 'cfg_weight' in sig.parameters:
+                    gen_params['cfg_weight'] = cfg_weight
+                if 'exaggeration' in sig.parameters:
+                    gen_params['exaggeration'] = exaggeration
+                if 'speed' in sig.parameters:
+                    gen_params['speed'] = speed
+
+        except Exception as e:
+            logger.debug(f"Could not inspect model parameters: {e}")
+
+        # Generate audio with Chatterbox-Turbo
+        wav = tts_model.generate(**gen_params)
 
         # Convert to numpy array
         if torch.is_tensor(wav):
@@ -212,6 +252,13 @@ def synthesize_with_chatterbox(text: str, voice: str = "default", speed: float =
         # Ensure 1D array
         if audio.ndim > 1:
             audio = audio.squeeze()
+
+        # Apply speed adjustment if not natively supported
+        if speed != 1.0 and 'speed' not in gen_params:
+            # Time-stretch the audio
+            target_length = int(len(audio) / speed)
+            indices = np.linspace(0, len(audio) - 1, target_length)
+            audio = np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
 
         # Normalize
         if np.max(np.abs(audio)) > 0:
@@ -281,11 +328,17 @@ async def synthesize(request: TTSRequest):
         full_audio = synthesize_with_chatterbox(
             request.text,
             request.voice,
-            request.speed
+            request.speed,
+            request.temperature,
+            request.cfg_weight,
+            request.exaggeration
         )
         gen_time = time.time() - start
 
-        logger.info(f"[TTS] Generated {len(request.text)} chars in {gen_time*1000:.0f}ms")
+        logger.info(
+            f"[TTS] Generated {len(request.text)} chars in {gen_time*1000:.0f}ms "
+            f"(temp={request.temperature}, cfg={request.cfg_weight}, exag={request.exaggeration})"
+        )
 
         # Process based on output format
         if request.output_format == "wav":
@@ -366,19 +419,27 @@ async def websocket_stream(websocket: WebSocket):
             voice = data.get("voice", DEFAULT_VOICE)
             output_format = data.get("format", "ulaw")
             speed = data.get("speed", 1.0)
+            temperature = data.get("temperature", 0.7)
+            cfg_weight = data.get("cfg_weight", 0.5)
+            exaggeration = data.get("exaggeration", 0.5)
 
             if not text:
                 await websocket.send_json({"error": "Text is required"})
                 continue
 
-            logger.info(f"[WS] Streaming: '{text[:50]}...' voice={voice}")
+            logger.info(
+                f"[WS] Streaming: '{text[:50]}...' voice={voice} "
+                f"temp={temperature} cfg={cfg_weight} exag={exaggeration}"
+            )
 
             start_time = time.time()
             total_bytes = 0
 
             try:
                 # Generate audio with Chatterbox-Turbo
-                audio = synthesize_with_chatterbox(text, voice, speed)
+                audio = synthesize_with_chatterbox(
+                    text, voice, speed, temperature, cfg_weight, exaggeration
+                )
 
                 # Resample to 8kHz for telephony
                 resampled = resample_audio(audio, SAMPLE_RATE, OUTPUT_SAMPLE_RATE)

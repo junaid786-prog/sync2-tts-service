@@ -1,0 +1,101 @@
+{
+  "presets": {
+    "natural": {
+      "description": "Natural, human-like speech with slight variations",
+      "temperature": 0.7,
+      "cfg_weight": 0.3,
+      "exaggeration": 0.5,
+      "speed": 0.95
+    },
+    "professional": {
+      "description": "Clear, consistent professional voice",
+      "temperature": 0.4,
+      "cfg_weight": 0.6,
+      "exaggeration": 0.3,
+      "speed": 0.98
+    },
+    "conversational": {
+      "description": "Warm, friendly conversational style",
+      "temperature": 0.8,
+      "cfg_weight": 0.25,
+      "exaggeration": 0.6,
+      "speed": 0.92
+    },
+    "expressive": {
+      "description": "Highly expressive with emotional variation",
+      "temperature": 1.0,
+      "cfg_weight": 0.2,
+      "exaggeration": 0.8,
+      "speed": 0.95
+    },
+    "calm": {
+      "description": "Calm, soothing voice for meditation or relaxation",
+      "temperature": 0.3,
+      "cfg_weight": 0.5,
+      "exaggeration": 0.2,
+      "speed": 0.88
+    },
+    "energetic": {
+      "description": "Upbeat, energetic speech",
+      "temperature": 0.9,
+      "cfg_weight": 0.3,
+      "exaggeration": 0.7,
+      "speed": 1.05
+    },
+    "robotic": {
+      "description": "Consistent, monotone robotic voice",
+      "temperature": 0.1,
+      "cfg_weight": 0.9,
+      "exaggeration": 0.1,
+      "speed": 1.0
+    }
+  },
+  "parameter_guide": {
+    "temperature": {
+      "range": [0.05, 5.0],
+      "description": "Controls randomness and variation in speech",
+      "recommendations": {
+        "low (0.1-0.4)": "Consistent, predictable speech",
+        "medium (0.5-0.8)": "Natural variation, recommended for most use cases",
+        "high (0.9-2.0)": "More creative, varied pronunciation and prosody"
+      }
+    },
+    "cfg_weight": {
+      "range": [0.0, 1.0],
+      "description": "Classifier-free guidance - controls adherence to text vs expressiveness",
+      "recommendations": {
+        "low (0.1-0.3)": "More expressive, dynamic, natural prosody",
+        "medium (0.4-0.6)": "Balanced between expressiveness and clarity",
+        "high (0.7-1.0)": "More literal, strict adherence to text, potentially monotone"
+      }
+    },
+    "exaggeration": {
+      "range": [0.0, 1.0],
+      "description": "Controls emotional intensity and prosody exaggeration",
+      "recommendations": {
+        "low (0.1-0.3)": "Subtle, understated emotion",
+        "medium (0.4-0.6)": "Natural emotional expression",
+        "high (0.7-1.0)": "Dramatic, exaggerated emotional delivery"
+      }
+    },
+    "speed": {
+      "range": [0.5, 2.0],
+      "description": "Speech rate multiplier",
+      "recommendations": {
+        "slow (0.7-0.9)": "Deliberate, easy to understand",
+        "normal (0.95-1.05)": "Natural speaking pace",
+        "fast (1.1-1.5)": "Quick, energetic delivery"
+      }
+    }
+  },
+  "recommended_for_medical_ai": {
+    "preset": "professional",
+    "custom_adjustments": {
+      "temperature": 0.5,
+      "cfg_weight": 0.4,
+      "exaggeration": 0.4,
+      "speed": 0.93,
+      "notes": "Balanced between professional clarity and natural warmth for patient interactions"
+    }
+  }
+}
