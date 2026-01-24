@@ -61,14 +61,20 @@ def load_model():
     try:
         from qwen_tts import Qwen3TTSModel
 
-        # Determine if we should use flash attention
-        use_flash = torch.cuda.is_available()
+        # Try to use flash attention if available, otherwise fall back to sdpa
+        try:
+            import flash_attn
+            attn_impl = "flash_attention_2"
+            logger.info("Using FlashAttention 2 for faster inference")
+        except ImportError:
+            attn_impl = "sdpa"
+            logger.info("FlashAttention not available, using SDPA")
 
         model = Qwen3TTSModel.from_pretrained(
             MODEL_NAME,
             device_map="cuda:0" if torch.cuda.is_available() else "cpu",
             dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-            attn_implementation="flash_attention_2" if use_flash else "sdpa",
+            attn_implementation=attn_impl,
         )
 
         logger.info(f"Model loaded successfully on {'CUDA' if torch.cuda.is_available() else 'CPU'}")
