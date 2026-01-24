@@ -172,9 +172,10 @@ async def generate_speech(text: str, voice: str = None, language: str = None,
         raise
 
 
-async def handle_websocket(websocket, path):
+async def handle_websocket(websocket):
     """Handle WebSocket connection for TTS streaming"""
     client_addr = websocket.remote_address
+    path = websocket.path if hasattr(websocket, 'path') else '/tts/stream'
     logger.info(f"Client connected: {client_addr}, path: {path}")
 
     try:
