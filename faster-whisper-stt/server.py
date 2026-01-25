@@ -121,11 +121,14 @@ def detect_voice_activity(audio_chunk: np.ndarray, sample_rate: int) -> float:
         vad_chunk_size = 512
         confidences = []
 
+        # Determine device for VAD model
+        vad_device = next(vad_model.parameters()).device
+
         for i in range(0, len(audio_chunk) - vad_chunk_size + 1, vad_chunk_size):
             chunk = audio_chunk[i:i + vad_chunk_size]
 
-            # Convert to tensor
-            audio_tensor = torch.from_numpy(chunk).float()
+            # Convert to tensor and move to same device as model
+            audio_tensor = torch.from_numpy(chunk).float().to(vad_device)
 
             # Silero VAD expects audio in range [-1, 1]
             if audio_tensor.abs().max() > 1.0:
