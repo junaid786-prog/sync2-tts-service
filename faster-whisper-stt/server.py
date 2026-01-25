@@ -116,18 +116,30 @@ def detect_voice_activity(audio_chunk: np.ndarray, sample_rate: int) -> float:
         if sample_rate != 16000:
             audio_chunk = resample_audio(audio_chunk, sample_rate, 16000)
 
-        # Convert to tensor
-        audio_tensor = torch.from_numpy(audio_chunk).float()
+        # Silero VAD expects exactly 512 samples at 16kHz (32ms chunks)
+        # Process in 512-sample windows and average the results
+        vad_chunk_size = 512
+        confidences = []
 
-        # Silero VAD expects audio in range [-1, 1]
-        if audio_tensor.abs().max() > 1.0:
-            audio_tensor = audio_tensor / audio_tensor.abs().max()
+        for i in range(0, len(audio_chunk) - vad_chunk_size + 1, vad_chunk_size):
+            chunk = audio_chunk[i:i + vad_chunk_size]
 
-        # Get VAD confidence
-        with torch.no_grad():
-            confidence = vad_model(audio_tensor, 16000).item()
+            # Convert to tensor
+            audio_tensor = torch.from_numpy(chunk).float()
 
-        return confidence
+            # Silero VAD expects audio in range [-1, 1]
+            if audio_tensor.abs().max() > 1.0:
+                audio_tensor = audio_tensor / audio_tensor.abs().max()
+
+            # Get VAD confidence
+            with torch.no_grad():
+                conf = vad_model(audio_tensor, 16000).item()
+                confidences.append(conf)
+
+        # Return max confidence from all chunks (if any speech detected)
+        if confidences:
+            return max(confidences)
+        return 0.0
 
     except Exception as e:
         logger.error(f"VAD error: {e}")
