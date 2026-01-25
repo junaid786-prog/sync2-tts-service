@@ -232,6 +232,7 @@ async def handle_websocket(websocket):
                 # Stream audio in chunks (for low latency)
                 chunk_size = 1600  # 200ms chunks at 8kHz
                 total_bytes = len(audio_bytes)
+                start_time = asyncio.get_event_loop().time()
 
                 logger.info(f"Streaming {total_bytes} bytes in {total_bytes // chunk_size + 1} chunks")
 
@@ -240,10 +241,15 @@ async def handle_websocket(websocket):
                     await websocket.send(chunk)
                     await asyncio.sleep(0.01)  # Small delay between chunks
 
-                # Send end marker
-                await websocket.send(b"END_OF_AUDIO")
+                # Calculate duration and send completion message (Chatterbox protocol compatible)
+                duration_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+                await websocket.send(json.dumps({
+                    "done": True,
+                    "duration_ms": duration_ms,
+                    "total_bytes": total_bytes
+                }))
 
-                logger.info(f"TTS complete: {total_bytes} bytes sent")
+                logger.info(f"TTS complete: {total_bytes} bytes sent in {duration_ms:.0f}ms")
 
             except json.JSONDecodeError as e:
                 logger.error(f"Invalid JSON: {e}")

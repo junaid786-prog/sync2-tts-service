@@ -1,0 +1,23 @@
+[Unit]
+Description=Faster Whisper STT WebSocket Server
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/faster-whisper-stt
+Environment="PATH=/home/ec2-user/miniconda/envs/faster-whisper-stt/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="WHISPER_MODEL_SIZE=medium"
+Environment="WHISPER_COMPUTE_TYPE=float16"
+Environment="WHISPER_DEVICE=cuda"
+Environment="STT_WEBSOCKET_PORT=8766"
+Environment="WHISPER_LANGUAGE=en"
+Environment="VAD_THRESHOLD=0.5"
+Environment="SILENCE_THRESHOLD_MS=800"
+Environment="BARGE_IN_THRESHOLD_MS=200"
+ExecStart=/home/ec2-user/miniconda/envs/faster-whisper-stt/bin/python server.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
