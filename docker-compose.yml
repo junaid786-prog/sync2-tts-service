@@ -1,19 +1,49 @@
 # Sync2 TTS Service - Docker Compose
-# Supports Kokoro, Piper, XTTS v2, and Fish Speech TTS engines
+# Supports Kokoro, Piper, XTTS v2, Fish Speech, and Chatterbox-Turbo TTS engines
 #
 # Usage:
 #   Kokoro:      docker-compose up kokoro-tts -d --build
 #   Piper:       docker-compose up piper-tts -d --build
 #   XTTS:        docker-compose up xtts-tts -d --build (requires GPU)
 #   Fish Speech: docker-compose up fish-tts -d --build (requires GPU, most natural)
+#   Chatterbox:  docker-compose up chatterbox-tts -d --build (requires GPU, sub-200ms)
 #
 # Switch between them (all use port 8765):
 #   docker stop sync2-tts-service && docker start sync2-piper-service
 #   docker stop sync2-piper-service && docker start sync2-xtts-service
 #   docker stop sync2-xtts-service && docker start sync2-fish-service
-#   docker stop sync2-fish-service && docker start sync2-tts-service
+#   docker stop sync2-fish-service && docker start sync2-chatterbox-service
 
 services:
+  # Chatterbox-Turbo TTS (GPU - sub-200ms latency, highly expressive)
+  chatterbox-tts:
+    build:
+      context: .
+      dockerfile: Dockerfile.chatterbox
+    container_name: sync2-chatterbox-service
+    ports:
+      - "8765:8765"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - chatterbox-models:/app/models
+      - ./voices:/app/voices
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 180s
+
   # Kokoro TTS (CPU - slower but expressive)
   kokoro-tts:
     build:
@@ -135,3 +165,4 @@ volumes:
   xtts-cache:
   fish-models:
   fish-cache:
+  chatterbox-models:
