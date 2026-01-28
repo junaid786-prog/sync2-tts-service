@@ -1,0 +1,49 @@
+# CSM-1B TTS Server Dockerfile
+# For AWS g5.xlarge (A10G 24GB GPU)
+
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    python3.10-venv \
+    git \
+    wget \
+    ffmpeg \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set python3.10 as default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 \
+    && update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+
+# Create working directory
+WORKDIR /app
+
+# Install PyTorch with CUDA
+RUN pip install --no-cache-dir torch==2.1.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
+
+# Copy requirements and install
+COPY csm_server/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy server code
+COPY csm_server/ .
+
+# Pre-download model (optional - can also download at runtime)
+# RUN python -c "from transformers import CsmForConditionalGeneration, AutoProcessor; AutoProcessor.from_pretrained('sesame/csm-1b'); CsmForConditionalGeneration.from_pretrained('sesame/csm-1b')"
+
+# Expose WebSocket port
+EXPOSE 8765
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s \
+    CMD python -c "import websockets; import asyncio; asyncio.run(websockets.connect('ws://localhost:8765/health'))" || exit 1
+
+# Run server
+CMD ["python", "server.py"]

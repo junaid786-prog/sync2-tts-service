@@ -1,5 +1,5 @@
 # Sync2 TTS Service - Docker Compose
-# Supports Kokoro, Piper, XTTS v2, Fish Speech, and Chatterbox-Turbo TTS engines
+# Supports Kokoro, Piper, XTTS v2, Fish Speech, Chatterbox-Turbo, and CSM-1B TTS engines
 #
 # Usage:
 #   Kokoro:      docker-compose up kokoro-tts -d --build
@@ -7,12 +7,14 @@
 #   XTTS:        docker-compose up xtts-tts -d --build (requires GPU)
 #   Fish Speech: docker-compose up fish-tts -d --build (requires GPU, most natural)
 #   Chatterbox:  docker-compose up chatterbox-tts -d --build (requires GPU, sub-200ms)
+#   CSM-1B:      docker-compose up csm-tts -d --build (requires GPU A10G+, conversational)
 #
 # Switch between them (all use port 8765):
 #   docker stop sync2-tts-service && docker start sync2-piper-service
 #   docker stop sync2-piper-service && docker start sync2-xtts-service
 #   docker stop sync2-xtts-service && docker start sync2-fish-service
 #   docker stop sync2-fish-service && docker start sync2-chatterbox-service
+#   docker stop sync2-chatterbox-service && docker start sync2-csm-service
 
 services:
   # Chatterbox-Turbo TTS (GPU - sub-200ms latency, highly expressive)
@@ -157,6 +159,36 @@ services:
       retries: 3
       start_period: 180s
 
+  # CSM-1B TTS (GPU A10G+ - conversational, natural speech)
+  csm-tts:
+    build:
+      context: .
+      dockerfile: Dockerfile.csm
+    container_name: sync2-csm-service
+    ports:
+      - "8765:8765"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+    volumes:
+      - csm-models:/root/.cache/huggingface
+      - ./voices:/app/voices
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import websockets; import asyncio; asyncio.run(websockets.connect('ws://localhost:8765/health'))"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 300s
+
 volumes:
   tts-models:
   tts-cache:
@@ -166,3 +198,4 @@ volumes:
   fish-models:
   fish-cache:
   chatterbox-models:
+  csm-models:

@@ -1,0 +1,16 @@
+# CSM-1B TTS Server Dependencies
+# PyTorch with CUDA - install separately:
+# pip install torch==2.1.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
+
+transformers>=4.40.0
+accelerate>=0.27.0
+safetensors>=0.4.0
+huggingface_hub>=0.21.0
+soundfile>=0.12.1
+scipy>=1.11.0
+numpy>=1.24.0
+websockets>=12.0
+fastapi>=0.109.0
+uvicorn>=0.27.0
+python-multipart>=0.0.6
+moshi>=0.2.0

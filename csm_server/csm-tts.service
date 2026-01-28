@@ -1,0 +1,27 @@
+[Unit]
+Description=CSM-1B TTS WebSocket Server
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/csm-tts-server
+Environment="PATH=/home/ec2-user/miniconda/envs/csm/bin:/usr/local/bin:/usr/bin"
+Environment="CUDA_VISIBLE_DEVICES=0"
+Environment="PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512"
+ExecStart=/home/ec2-user/miniconda/envs/csm/bin/python server.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=csm-tts
+
+# Resource limits
+MemoryMax=20G
+TasksMax=100
+
+[Install]
+WantedBy=multi-user.target
