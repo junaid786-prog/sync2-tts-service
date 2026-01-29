@@ -124,18 +124,15 @@ class CSMModel:
                 top_k=top_k,
             )
 
-        # Convert to numpy
-        if isinstance(audio_output, torch.Tensor):
+        # Convert to numpy - CSM returns list of tensors
+        if isinstance(audio_output, list):
+            # CSM returns [tensor] - extract first element
+            audio_tensor = audio_output[0]
+            audio = audio_tensor.squeeze().cpu().numpy().astype(np.float32)
+        elif isinstance(audio_output, torch.Tensor):
             audio = audio_output.squeeze().cpu().numpy().astype(np.float32)
-        elif hasattr(audio_output, 'cpu'):
-            # Handle other tensor-like objects
-            audio = audio_output.cpu().numpy().astype(np.float32)
         else:
-            # Try to convert, ensuring CPU transfer if needed
-            try:
-                audio = np.array(audio_output, dtype=np.float32)
-            except TypeError:
-                audio = torch.tensor(audio_output).cpu().numpy().astype(np.float32)
+            audio = np.array(audio_output, dtype=np.float32)
 
         # Normalize
         if np.abs(audio).max() > 1.0:
