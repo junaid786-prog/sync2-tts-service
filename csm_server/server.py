@@ -30,7 +30,7 @@ PORT = 8765
 MAX_CONCURRENT = 10
 
 
-async def handle_tts_request(websocket: WebSocketServerProtocol, path: str):
+async def handle_tts_request(websocket):
     """Handle TTS WebSocket connection"""
     client_id = id(websocket)
     logger.info(f"[{client_id}] New connection from {websocket.remote_address}")
@@ -99,7 +99,7 @@ async def handle_tts_request(websocket: WebSocketServerProtocol, path: str):
         logger.error(f"[{client_id}] Connection error: {e}")
 
 
-async def handle_streaming_tts(websocket: WebSocketServerProtocol, path: str):
+async def handle_streaming_tts(websocket):
     """Handle streaming TTS for real-time applications"""
     client_id = id(websocket)
 
@@ -147,7 +147,7 @@ def adjust_speed(audio: np.ndarray, speed: float, sample_rate: int) -> np.ndarra
     return audio_tensor.squeeze(0).numpy()
 
 
-async def health_check(websocket: WebSocketServerProtocol, path: str):
+async def health_check(websocket):
     """Health check endpoint"""
     await websocket.send(json.dumps({
         "status": "healthy",
@@ -156,17 +156,20 @@ async def health_check(websocket: WebSocketServerProtocol, path: str):
     }))
 
 
-async def router(websocket: WebSocketServerProtocol, path: str):
+async def router(websocket):
     """Route requests to appropriate handler"""
+    # Get path from websocket (works with newer websockets library)
+    path = getattr(websocket, 'path', '/tts/stream')
+
     if path == "/health":
-        await health_check(websocket, path)
+        await health_check(websocket)
     elif path == "/tts/stream":
-        await handle_tts_request(websocket, path)
+        await handle_tts_request(websocket)
     elif path == "/tts/realtime":
-        await handle_streaming_tts(websocket, path)
+        await handle_streaming_tts(websocket)
     else:
         # Default to standard TTS
-        await handle_tts_request(websocket, path)
+        await handle_tts_request(websocket)
 
 
 async def main():
