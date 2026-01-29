@@ -127,8 +127,15 @@ class CSMModel:
         # Convert to numpy
         if isinstance(audio_output, torch.Tensor):
             audio = audio_output.squeeze().cpu().numpy().astype(np.float32)
+        elif hasattr(audio_output, 'cpu'):
+            # Handle other tensor-like objects
+            audio = audio_output.cpu().numpy().astype(np.float32)
         else:
-            audio = np.array(audio_output, dtype=np.float32)
+            # Try to convert, ensuring CPU transfer if needed
+            try:
+                audio = np.array(audio_output, dtype=np.float32)
+            except TypeError:
+                audio = torch.tensor(audio_output).cpu().numpy().astype(np.float32)
 
         # Normalize
         if np.abs(audio).max() > 1.0:
