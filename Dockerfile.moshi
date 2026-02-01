@@ -1,0 +1,33 @@
+# Moshi Speech-to-Speech Server
+# Docker container for running Moshi S2S model
+
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    ffmpeg \
+    libsndfile1 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY moshi_server/requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy server code
+COPY moshi_server/ /app/
+
+# Expose WebSocket port
+EXPOSE 8770
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8770/ || exit 1
+
+# Run server
+CMD ["python", "moshi_server.py", "--host", "0.0.0.0", "--port", "8770"]

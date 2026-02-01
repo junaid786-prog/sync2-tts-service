@@ -1,0 +1,30 @@
+# Moshi S2S Server Dependencies
+# ===============================
+
+# Web server
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+websockets==12.0
+
+# PyTorch (CPU version - change to GPU version if needed)
+torch==2.1.2
+torchaudio==2.1.2
+torchvision==0.16.2
+
+# ML/AI libraries
+transformers==4.37.0
+accelerate==0.26.0
+sentencepiece==0.1.99
+
+# Audio processing
+numpy==1.24.3
+scipy==1.11.4
+librosa==0.10.1
+soundfile==0.12.1
+
+# Utilities
+python-multipart==0.0.6
+pydantic==2.5.3
+
+# Note: Add actual Moshi model package when available
+# moshi-ai==0.1.0  # Placeholder - replace with actual package

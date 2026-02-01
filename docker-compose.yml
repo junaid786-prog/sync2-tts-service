@@ -1,5 +1,5 @@
 # Sync2 TTS Service - Docker Compose
-# Supports Kokoro, Piper, XTTS v2, Fish Speech, Chatterbox-Turbo, and CSM-1B TTS engines
+# Supports Kokoro, Piper, XTTS v2, Fish Speech, Chatterbox-Turbo, CSM-1B TTS engines, and Moshi S2S
 #
 # Usage:
 #   Kokoro:      docker-compose up kokoro-tts -d --build
@@ -8,8 +8,11 @@
 #   Fish Speech: docker-compose up fish-tts -d --build (requires GPU, most natural)
 #   Chatterbox:  docker-compose up chatterbox-tts -d --build (requires GPU, sub-200ms)
 #   CSM-1B:      docker-compose up csm-tts -d --build (requires GPU A10G+, conversational)
+#   Moshi S2S:   docker-compose up moshi-s2s -d --build (requires GPU, real-time duplex)
 #
-# Switch between them (all use port 8765):
+# Switch between them:
+#   TTS services use port 8765
+#   Moshi S2S uses port 8770
 #   docker stop sync2-tts-service && docker start sync2-piper-service
 #   docker stop sync2-piper-service && docker start sync2-xtts-service
 #   docker stop sync2-xtts-service && docker start sync2-fish-service
@@ -189,6 +192,39 @@ services:
       retries: 3
       start_period: 300s
 
+  # Moshi S2S (GPU - real-time duplex speech-to-speech, ~200ms latency)
+  moshi-s2s:
+    build:
+      context: .
+      dockerfile: Dockerfile.moshi
+    container_name: sync2-moshi-service
+    ports:
+      - "8770:8770"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - moshi-models:/root/.cache/huggingface
+      - ./moshi_server/logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          memory: 4G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8770/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
 volumes:
   tts-models:
   tts-cache:
@@ -199,3 +235,4 @@ volumes:
   fish-cache:
   chatterbox-models:
   csm-models:
+  moshi-models:
